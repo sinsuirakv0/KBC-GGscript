@@ -49,8 +49,9 @@ end
 
 local function hasDataFiles(directory)
   return fileExists(directory .. "/units/unit000.csv")
-    and fileExists(directory .. "/names/Unit_Explanation1_ja.csv")
     and fileExists(directory .. "/status-fields.csv")
+    and (fileExists(directory .. "/unit-index.csv")
+      or fileExists(directory .. "/names/Unit_Explanation1_ja.csv"))
 end
 
 local function removeTrailingSlash(path)
@@ -59,9 +60,27 @@ end
 
 local function splitCsv(line)
   local values = {}
-  for value in (line .. ","):gmatch("(.-),") do
-    values[#values + 1] = trim(value)
+  local buffer = {}
+  local quoted = false
+  local index = 1
+  while index <= #line do
+    local character = line:sub(index, index)
+    if character == '"' then
+      if quoted and line:sub(index + 1, index + 1) == '"' then
+        buffer[#buffer + 1] = '"'
+        index = index + 1
+      else
+        quoted = not quoted
+      end
+    elseif character == "," and not quoted then
+      values[#values + 1] = trim(table.concat(buffer))
+      buffer = {}
+    else
+      buffer[#buffer + 1] = character
+    end
+    index = index + 1
   end
+  values[#values + 1] = trim(table.concat(buffer))
   return values
 end
 
@@ -126,7 +145,7 @@ local function initializePaths()
   end
 
   local selection = gg.prompt(
-    { "units・names・status-fields.csv がある data フォルダのフルパス" },
+    { "units・unit-index.csv・status-fields.csv がある data フォルダのフルパス" },
     { "/storage/emulated/0/Download/KBC-rakv0-status-script/data" },
     { "text" }
   )
@@ -179,7 +198,52 @@ local function loadFields()
   return true
 end
 
-local function loadNames()
+local function loadNamesFromIndex()
+  local content, errorMessage = readFile(state.dataDirectory .. "/unit-index.csv")
+  if not content then
+    return nil, errorMessage
+  end
+
+  local lineNumber = 0
+  for line in content:gmatch("[^\r\n]+") do
+    lineNumber = lineNumber + 1
+    if lineNumber > 1 then
+      local columns = splitCsv(line)
+      local unitId = tonumber(columns[1])
+      local formIndex = tonumber(columns[2])
+      local formName = trim(columns[3] or "")
+      if not unitId or not formIndex or formName == "" then
+        return nil, string.format("unit-index.csv の%d行目が不正です。", lineNumber)
+      end
+
+      local character = state.characters[unitId]
+      if not character then
+        if formIndex ~= 0 then
+          return nil, string.format("unit %d の第1形態が索引にありません。", unitId)
+        end
+        character = {
+          id = unitId,
+          fileName = string.format("unit%03d.csv", unitId),
+          name = formName,
+          forms = {}
+        }
+        state.characters[unitId] = character
+        state.names[#state.names + 1] = character
+      end
+      if character.forms[formIndex] then
+        return nil, string.format("unit %d の形態%dが重複しています。", unitId, formIndex)
+      end
+      character.forms[formIndex] = { index = formIndex, label = formName }
+    end
+  end
+
+  if #state.names == 0 then
+    return nil, "unit-index.csv にキャラ名がありません。"
+  end
+  return true
+end
+
+local function loadNamesFromExplanations()
   local sourceId = 1
   while sourceId <= 4096 do
     local explanationPath = string.format("%s/names/Unit_Explanation%d_ja.csv", state.dataDirectory, sourceId)
@@ -240,6 +304,14 @@ local function loadNames()
     return nil, "形態名ファイルを読み込めません。"
   end
   return true
+end
+
+local function loadNames()
+  if fileExists(state.dataDirectory .. "/unit-index.csv") then
+    return loadNamesFromIndex()
+  end
+  -- 古い配布物は従来方式でも起動できるが、ファイル数が多いため遅い。
+  return loadNamesFromExplanations()
 end
 
 local function loadUnitRows(character)
@@ -429,7 +501,12 @@ local function chooseField(title)
   return selectedField and (selectedField - 1) or nil
 end
 
-local function editField(character, formIndex, row, unitTableAddress, column)
+local function editField(character, formIndex, row, column)
+  local unitTableAddress, addressError = findUnitTableAddress()
+  if not unitTableAddress then
+    gg.alert(addressError)
+    return
+  end
   local address = unitTableAddress + character.id * UNIT_SIZE + formIndex * RECORD_SIZE + column * 4
   local currentValue = getAddressValue(address)
   local field = state.fields[column + 1]
@@ -481,11 +558,6 @@ local function openCharacter(character)
     gg.alert(errorMessage or "ステータスCSVを読めません。")
     return
   end
-  local unitTableAddress, addressError = findUnitTableAddress()
-  if not unitTableAddress then
-    gg.alert(addressError)
-    return
-  end
 
   while true do
     local formIndex = chooseForm(character)
@@ -504,7 +576,7 @@ local function openCharacter(character)
       if column == nil then
         break
       end
-      editField(character, formIndex, row, unitTableAddress, column)
+      editField(character, formIndex, row, column)
     end
   end
 end

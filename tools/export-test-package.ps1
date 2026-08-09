@@ -14,6 +14,9 @@ if (-not (Test-Path -LiteralPath (Join-Path $dataDirectory "names\Unit_Explanati
 if (-not (Test-Path -LiteralPath (Join-Path $dataDirectory "status-fields.csv"))) {
     throw "data/status-fields.csv が見つかりません。"
 }
+if (-not (Test-Path -LiteralPath (Join-Path $dataDirectory "unit-index.csv"))) {
+    throw "data/unit-index.csv が見つかりません。tools/build-unit-index.ps1 を実行してください。"
+}
 
 New-Item -ItemType Directory -Path $DestinationDirectory -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $DestinationDirectory "lua") -Force | Out-Null
@@ -29,6 +32,7 @@ if ([System.IO.File]::Exists($legacyNameIndex)) {
 
 Copy-Item -LiteralPath $scriptPath -Destination (Join-Path $DestinationDirectory "lua\kbc-status-test.lua") -Force
 Copy-Item -LiteralPath (Join-Path $dataDirectory "status-fields.csv") -Destination (Join-Path $destinationDataDirectory "status-fields.csv") -Force
+Copy-Item -LiteralPath (Join-Path $dataDirectory "unit-index.csv") -Destination (Join-Path $destinationDataDirectory "unit-index.csv") -Force
 Get-ChildItem -LiteralPath (Join-Path $dataDirectory "units") -File -Filter "unit*.csv" |
     Copy-Item -Destination $destinationUnitsDirectory -Force
 Get-ChildItem -LiteralPath (Join-Path $dataDirectory "names") -File -Filter "Unit_Explanation*_ja.csv" |

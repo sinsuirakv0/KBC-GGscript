@@ -96,5 +96,7 @@ foreach ($sourceFile in $sourceFiles) {
     [System.IO.File]::WriteAllText($targetPath, (($convertedRows -join [Environment]::NewLine) + [Environment]::NewLine), $utf8NoBom)
 }
 
+& (Join-Path $PSScriptRoot "build-unit-index.ps1") -DataDirectory $DestinationDirectory
+
 Write-Host ("変換完了: {0} ユニット、{1} 名前ファイル" -f $sourceFiles.Count, $explanationCount)
 Write-Host "出力先: $DestinationDirectory"
