@@ -12,6 +12,10 @@ local MAX_ANCHOR_CANDIDATES = 256
 local SAVE_SEARCH_START_OFFSET = 0x2100
 local SAVE_SEARCH_END_OFFSET = 0xFFFFF
 local SAVE_ANALYSIS_WINDOW = 0x6400
+local SAVE_RESULT_BATCH_SIZE = 6000
+local MAX_SAVE_BASE_RESULTS = 4096
+local MAX_SAVE_BASE_VERIFICATIONS = 8
+local MAX_SAVE_TABLE_CANDIDATES = 8
 local SIGN_EQUAL = gg.SIGN_EQUAL or 536870912
 
 local state = {
@@ -397,7 +401,9 @@ local function kenkouResolveSaveBaseAddress()
   local memoryFrom = splitRange and splitRange.start or 0
   local memoryTo = splitRange and (splitRange.start + 0xFFFF) or -1
   gg.clearResults()
-  gg.setRanges(splitRange and -2080896 or (gg.REGION_C_BSS or 48))
+  -- kenkou: 32-bit側の48は元setup.luaと同じ複合範囲。C_BSS単独へ狭めない。
+  gg.setRanges(splitRange and -2080896 or 48)
+  gg.toast("保存領域の基準を探索中")
   gg.searchNumber(timezonePattern, gg.TYPE_BYTE, false, SIGN_EQUAL, memoryFrom, memoryTo)
   if gg.getResultsCount() == 0 then
     gg.clearResults()
@@ -410,81 +416,62 @@ local function kenkouResolveSaveBaseAddress()
     return nil, "保存領域の基準候補を取得できません。"
   end
   gg.refineNumber(firstResult.value, gg.TYPE_BYTE)
-  local results = kenkouGetSortedResults()
+  local refinedCount = gg.getResultsCount()
+  if refinedCount > MAX_SAVE_BASE_RESULTS then
+    gg.clearResults()
+    return nil, string.format("保存領域の基準候補が多すぎます（%d件）。アプリを再起動してください。", refinedCount)
+  end
+  local results = kenkouGetSortedResults(MAX_SAVE_BASE_RESULTS)
   gg.clearResults()
 
+  local verificationCount = 0
   for index, result in ipairs(results) do
     if not results[index + 2] then
       state.saveBaseAddress = result.address
       return result.address
     end
     local gap = results[index + 2].address - results[index + 1].address
-    if gap > 0x3000 and gap < 0x4FFF and kenkouVerifySaveBaseCandidate(result.address) then
-      state.saveBaseAddress = result.address
-      return result.address
+    if gap > 0x3000 and gap < 0x4FFF then
+      verificationCount = verificationCount + 1
+      if verificationCount > MAX_SAVE_BASE_VERIFICATIONS then
+        break
+      end
+      if kenkouVerifySaveBaseCandidate(result.address) then
+        state.saveBaseAddress = result.address
+        return result.address
+      end
     end
   end
   return nil, "保存領域の基準候補を検証できません。"
 end
 
-local function kenkouGetRequiredSaveUnitCount()
-  local requiredCount = 0
-  for _, character in ipairs(state.names) do
-    requiredCount = math.max(requiredCount, character.id + 1)
+local function kenkouValidateSaveCharacterTables(tables)
+  local ownershipCount = #tables.ownership
+  local levelCount = #tables.level
+  local formCount = #tables.form
+  local safeCount = math.min(ownershipCount, math.floor(levelCount / 2), formCount)
+  if safeCount < 32 or safeCount > 4096 then
+    return false
   end
-  return requiredCount
+  if tables.level[1].address <= tables.ownership[#tables.ownership].address then
+    return false
+  end
+  if tables.form[1].address <= tables.level[#tables.level].address then
+    return false
+  end
+  tables.unitCount = safeCount
+  return true
 end
 
-local function kenkouValidateSaveCharacterTables(tables)
-  local requiredCount = kenkouGetRequiredSaveUnitCount()
-  if tables.unitCount < requiredCount or tables.unitCount > 4096 then
-    return false
+local function kenkouReadSaveRecords(memoryFrom, memoryTo)
+  if memoryTo <= memoryFrom then
+    return {}
   end
-  if tables.levelStart ~= tables.ownershipStart + tables.unitCount * 4 then
-    return false
-  end
-  if tables.formStart ~= tables.levelStart + tables.unitCount * 8 then
-    return false
-  end
-
-  -- kenkou: 先頭16体を読み、別配列への誤認を防いでから書き込みを許可する。
-  local sampleCount = math.min(16, tables.unitCount)
-  local requests = {}
-  for saveId = 1, sampleCount do
-    requests[#requests + 1] = {
-      address = tables.ownershipStart + (saveId - 1) * 4,
-      flags = gg.TYPE_DWORD
-    }
-    requests[#requests + 1] = {
-      address = tables.levelStart + (saveId - 1) * 8 + 4,
-      flags = gg.TYPE_DWORD
-    }
-    requests[#requests + 1] = {
-      address = tables.formStart + (saveId - 1) * 4,
-      flags = gg.TYPE_DWORD
-    }
-  end
-  local values = gg.getValues(requests)
-  if #values ~= #requests then
-    return false
-  end
-
-  local validLevelMarkers = 0
-  for index = 1, #values, 3 do
-    local ownershipValue = tonumber(values[index].value)
-    local levelMarker = tonumber(values[index + 1].value)
-    local formValue = tonumber(values[index + 2].value)
-    if not ownershipValue or ownershipValue < -257 or ownershipValue > 256 then
-      return false
-    end
-    if not formValue or formValue < -1 or formValue > 10 or formValue % 1 ~= 0 then
-      return false
-    end
-    if levelMarker == 0 or levelMarker == 65536 or levelMarker == 131072 then
-      validLevelMarkers = validLevelMarkers + 1
-    end
-  end
-  return validLevelMarkers >= math.min(4, sampleCount)
+  gg.clearResults()
+  gg.searchNumber("0~~0", gg.TYPE_DWORD, false, SIGN_EQUAL, memoryFrom, memoryTo)
+  local results = kenkouGetSortedResults()
+  gg.clearResults()
+  return results
 end
 
 local function kenkouFindSaveCharacterTables(anchorAddress, anchorValue)
@@ -492,7 +479,7 @@ local function kenkouFindSaveCharacterTables(anchorAddress, anchorValue)
   gg.clearResults()
   gg.searchNumber(string.format("%d~%d", anchorValue - 1, anchorValue + 1), gg.TYPE_DWORD, false,
     SIGN_EQUAL, anchorAddress - 0x500, anchorAddress + SAVE_ANALYSIS_WINDOW)
-  local startResults = kenkouGetSortedResults()
+  local startResults = gg.getResultsCount() > 0 and gg.getResults(1) or {}
   gg.clearResults()
   local startAddress = startResults[1] and startResults[1].address or nil
   if not startAddress then
@@ -501,24 +488,22 @@ local function kenkouFindSaveCharacterTables(anchorAddress, anchorValue)
 
   gg.searchNumber("0~10", gg.TYPE_DWORD, false, SIGN_EQUAL, anchorAddress,
     anchorAddress + SAVE_ANALYSIS_WINDOW)
-  local endResults = kenkouGetSortedResults()
+  local endResults = gg.getResultsCount() > 0 and gg.getResults(1) or {}
   gg.clearResults()
+  local levelEnd = endResults[1] and (endResults[1].address - 4) or nil
+  if not levelEnd or levelEnd <= startAddress then
+    return nil
+  end
 
-  for _, endResult in ipairs(endResults) do
-    local levelEnd = endResult.address - 4
-    local combinedBytes = levelEnd - startAddress + 4
-    if combinedBytes > 0 and combinedBytes % 12 == 0 then
-      local unitCount = math.floor(combinedBytes / 12)
-      local tables = {
-        ownershipStart = startAddress,
-        levelStart = startAddress + unitCount * 4,
-        formStart = startAddress + unitCount * 12,
-        unitCount = unitCount
-      }
-      if kenkouValidateSaveCharacterTables(tables) then
-        return tables
-      end
-    end
+  -- kenkou: 元スクリプトと同じ3分割範囲から、実際のDWORDレコードを取得する。
+  local sectionWidth = (levelEnd - startAddress) / 3
+  local tables = {
+    ownership = kenkouReadSaveRecords(startAddress, startAddress + sectionWidth),
+    level = kenkouReadSaveRecords(startAddress + sectionWidth + 4, levelEnd),
+    form = kenkouReadSaveRecords(levelEnd + 4, levelEnd + sectionWidth)
+  }
+  if kenkouValidateSaveCharacterTables(tables) then
+    return tables
   end
   return nil
 end
@@ -533,37 +518,64 @@ local function kenkouResolveSaveCharacterTables()
   end
 
   gg.clearResults()
+  gg.toast("キャラ保存状態を探索中")
   local pattern = "-257~~256" .. (";-257~~256"):rep(63) .. ":253"
   gg.searchNumber(pattern, gg.TYPE_DWORD, false, SIGN_EQUAL,
     baseAddress + SAVE_SEARCH_START_OFFSET, baseAddress + SAVE_SEARCH_END_OFFSET)
-  local results = kenkouGetSortedResults()
-  gg.clearResults()
-  if #results < 16 then
+  local resultCount = gg.getResultsCount()
+  if resultCount < 16 then
+    gg.clearResults()
     return nil, "キャラ保存状態の配列候補が見つかりません。"
   end
 
+  -- kenkou: 大量結果を一括取得・ソートせず、元の120件間隔を保って分割処理する。
+  local candidates = {}
   local cachedValue = nil
-  for index = 1, #results - 15, 120 do
-    local current = results[index]
-    local comparable = cachedValue
-      and math.abs((tonumber(current.value) or 0) - (tonumber(results[index + 3].value) or 0)) < 2
-      and math.abs((tonumber(results[index + 10].value) or 0) - (tonumber(results[index + 15].value) or 0)) < 2
-    if comparable then
-      if cachedValue ~= results[index + 14].value then
-        cachedValue = current.value
-      else
-        local tables = kenkouFindSaveCharacterTables(current.address, tonumber(current.value) or 0)
-        if tables then
-          state.saveCharacterTables = tables
-          return tables
+  local skip = 0
+  while skip < resultCount - 15 and #candidates < MAX_SAVE_TABLE_CANDIDATES do
+    local batchCount = math.min(SAVE_RESULT_BATCH_SIZE, resultCount - skip)
+    local results = gg.getResults(batchCount, skip)
+    if #results < 16 then
+      break
+    end
+    for index = 1, #results - 15, 120 do
+      local current = results[index]
+      local comparable = cachedValue
+        and math.abs((tonumber(current.value) or 0) - (tonumber(results[index + 3].value) or 0)) < 2
+        and math.abs((tonumber(results[index + 10].value) or 0) - (tonumber(results[index + 15].value) or 0)) < 2
+      if comparable then
+        if cachedValue ~= results[index + 14].value then
+          cachedValue = current.value
+        else
+          candidates[#candidates + 1] = {
+            address = current.address,
+            value = tonumber(current.value) or 0
+          }
+          cachedValue = -1
+          if #candidates >= MAX_SAVE_TABLE_CANDIDATES then
+            break
+          end
         end
+      else
         cachedValue = -1
       end
-    else
-      cachedValue = -1
+    end
+    skip = skip + SAVE_RESULT_BATCH_SIZE
+  end
+  gg.clearResults()
+
+  if #candidates == 0 then
+    return nil, string.format("キャラ保存状態の構造候補が見つかりません（検索結果%d件）。", resultCount)
+  end
+  for index, candidate in ipairs(candidates) do
+    gg.toast(string.format("保存配列を確認中 %d/%d", index, #candidates))
+    local tables = kenkouFindSaveCharacterTables(candidate.address, candidate.value)
+    if tables then
+      state.saveCharacterTables = tables
+      return tables
     end
   end
-  return nil, "キャラ保存状態の配列を安全に検証できません。アプリとdataのバージョンを確認してください。"
+  return nil, string.format("保存配列を確認できませんでした（候補%d件）。", #candidates)
 end
 
 local function chooseFromList(characters)
@@ -814,13 +826,22 @@ local function kenkouGetSaveAddresses(character)
   if saveId < 1 or saveId > tables.unitCount then
     return nil, string.format("%sの保存IDが配列範囲外です。", character.name)
   end
+  local ownershipRecord = tables.ownership[saveId]
+  local firstLevelRecord = tables.level[saveId * 2 - 1]
+  local secondLevelRecord = tables.level[saveId * 2]
+  local formRecord = tables.form[saveId]
+  local catOwnershipRecord = tables.ownership[1]
+  if not ownershipRecord or not firstLevelRecord or not secondLevelRecord or not formRecord
+    or not catOwnershipRecord then
+    return nil, string.format("%sの保存レコードを取得できません。", character.name)
+  end
   return {
     saveId = saveId,
-    ownership = tables.ownershipStart + (saveId - 1) * 4,
-    level = tables.levelStart + (saveId - 1) * 8,
-    levelMarker = tables.levelStart + (saveId - 1) * 8 + 4,
-    form = tables.formStart + (saveId - 1) * 4,
-    catOwnership = tables.ownershipStart
+    ownership = ownershipRecord.address,
+    level = firstLevelRecord.address,
+    levelMarker = secondLevelRecord.address,
+    form = formRecord.address,
+    catOwnership = catOwnershipRecord.address
   }
 end
 
