@@ -685,6 +685,27 @@ local function kenkouReadFormValues(character, formIndex, row)
   return values
 end
 
+local function kenkouResetStatusValues(currentValues, row)
+  local writes = {}
+  for index = 1, RECORD_COLUMN_COUNT do
+    local initialValue = tonumber(row[index]) or 0
+    local currentValue = tonumber(currentValues[index] and currentValues[index].value) or initialValue
+    if currentValue ~= initialValue then
+      writes[#writes + 1] = {
+        address = currentValues[index].address,
+        flags = gg.TYPE_DWORD,
+        value = initialValue
+      }
+    end
+  end
+  if #writes == 0 then
+    gg.toast("すでに初期状態です")
+    return
+  end
+  gg.setValues(writes)
+  gg.toast(string.format("%d項目を初期状態に戻しました", #writes))
+end
+
 local function kenkouOpenStatusEditor(character, formIndex, row)
   local currentValues, errorMessage = kenkouReadFormValues(character, formIndex, row)
   if not currentValues then
@@ -692,9 +713,10 @@ local function kenkouOpenStatusEditor(character, formIndex, row)
     return
   end
 
-  local prompts = { "戻る（変更せず戻る）" }
-  local defaults = { false }
-  local types = { "checkbox" }
+  local fieldOffset = 2
+  local prompts = { "戻る（変更せず戻る）", "全てリセット" }
+  local defaults = { false, false }
+  local types = { "checkbox", "checkbox" }
   for index, field in ipairs(state.fields) do
     local memoryValue = tonumber(currentValues[index] and currentValues[index].value) or row[index] or 0
     local csvValue = memoryValue / field.multiplier
@@ -723,14 +745,21 @@ local function kenkouOpenStatusEditor(character, formIndex, row)
   if prompt[1] == true or prompt[#prompt] == true then
     return
   end
+  if prompt[2] == true then
+    local confirmation = gg.alert("ステータスを全てリセットしますか？", "はい", "いいえ")
+    if confirmation == 1 then
+      kenkouResetStatusValues(currentValues, row)
+    end
+    return
+  end
 
   local writes = {}
   for index, field in ipairs(state.fields) do
     local inputValue
     if field.fieldType == "checkbox" then
-      inputValue = prompt[index + 1] == true and 1 or 0
+      inputValue = prompt[index + fieldOffset] == true and 1 or 0
     else
-      inputValue = tonumber(prompt[index + 1])
+      inputValue = tonumber(prompt[index + fieldOffset])
       if not inputValue or inputValue % 1 ~= 0 then
         gg.alert(field.name .. " は整数で入力してください。")
         return
