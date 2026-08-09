@@ -48,13 +48,18 @@ local function readFile(path)
   return content
 end
 
-local function hasNameIndex(directory)
-  local file = io.open(directory .. "/unit-names.csv", "r")
+local function fileExists(path)
+  local file = io.open(path, "r")
   if not file then
     return false
   end
   file:close()
   return true
+end
+
+local function hasDataFiles(directory)
+  return fileExists(directory .. "/units/unit000.csv")
+    and fileExists(directory .. "/names/Unit_Explanation1_ja.csv")
 end
 
 local function removeTrailingSlash(path)
@@ -93,14 +98,14 @@ local function initializePaths()
     "/sdcard/Download/KBC-rakv0-status-script/data"
   }
   for _, directory in ipairs(candidates) do
-    if hasNameIndex(directory) then
+    if hasDataFiles(directory) then
       state.dataDirectory = directory
       return true
     end
   end
 
   local selection = gg.prompt(
-    { "unit-names.csv がある data フォルダのフルパス" },
+    { "units と names がある data フォルダのフルパス" },
     { "/storage/emulated/0/Download/KBC-rakv0-status-script/data" },
     { "text" }
   )
@@ -108,37 +113,72 @@ local function initializePaths()
     return nil, "data フォルダが指定されませんでした。"
   end
   local directory = removeTrailingSlash(trim(selection[1] or ""))
-  if directory == "" or not hasNameIndex(directory) then
-    return nil, "unit-names.csv を取得できません。data フォルダ全体をコピーして指定してください。"
+  if directory == "" or not hasDataFiles(directory) then
+    return nil, "ユニットデータを取得できません。data フォルダ全体をコピーして指定してください。"
   end
   state.dataDirectory = directory
   return true
 end
 
 local function loadNames()
-  local content, errorMessage = readFile(state.dataDirectory .. "/unit-names.csv")
-  if not content then
-    return nil, "unit-names.csv を読めません: " .. tostring(errorMessage)
-  end
-
-  for line in content:gmatch("[^\r\n]+") do
-    local columns = splitCsv(line)
-    local unitId = tonumber(columns[1])
-    local form = tonumber(columns[3])
-    if unitId and form and columns[2] and columns[4] and columns[5] then
-      local character = state.characters[unitId]
-      if not character then
-        character = { id = unitId, fileName = columns[2], name = columns[4], forms = {} }
-        state.characters[unitId] = character
-        state.names[#state.names + 1] = character
-      end
-      character.forms[form] = { index = form, label = columns[5] }
+  local sourceId = 1
+  while sourceId <= 4096 do
+    local explanationPath = string.format("%s/names/Unit_Explanation%d_ja.csv", state.dataDirectory, sourceId)
+    local content = readFile(explanationPath)
+    if not content then
+      break
     end
+
+    local unitId = sourceId - 1
+    local fileName = string.format("unit%03d.csv", unitId)
+    if not fileExists(state.dataDirectory .. "/units/" .. fileName) then
+      return nil, string.format("%s に対応するステータスCSVがありません。", fileName)
+    end
+
+    local formNames = {}
+    local lastFormName = nil
+    for line in content:gmatch("[^\r\n]+") do
+      local columns = splitCsv(line)
+      local formName = trim(columns[1] or "")
+      local description = trim(columns[2] or "")
+      if formName:match("^8%d%d[-_]%d+$") and description:match("^精霊[：:]") then
+        formName = "精霊"
+      end
+      if formName ~= "" then
+        -- 同じ名前で埋められた末尾形態は選択肢へ追加しない。
+        if lastFormName and formName == lastFormName then
+          break
+        end
+        formNames[#formNames + 1] = formName
+        lastFormName = formName
+      end
+    end
+
+    if #formNames == 0 then
+      return nil, string.format("Unit_Explanation%d_ja.csv に形態名がありません。", sourceId)
+    end
+
+    local character = {
+      id = unitId,
+      fileName = fileName,
+      name = formNames[1],
+      forms = {}
+    }
+    for index, formName in ipairs(formNames) do
+      local form = index - 1
+      character.forms[form] = { index = form, label = formName }
+    end
+    state.characters[unitId] = character
+    state.names[#state.names + 1] = character
+    sourceId = sourceId + 1
   end
 
-  table.sort(state.names, function(left, right) return left.id < right.id end)
+  if sourceId > 4096 then
+    return nil, "名前ファイルが多すぎます。"
+  end
+
   if #state.names == 0 then
-    return nil, "unit-names.csv に有効なユニットがありません。"
+    return nil, "形態名ファイルを読み込めません。"
   end
   return true
 end
