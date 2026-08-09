@@ -1,6 +1,2 @@
-# 復号済みゲームデータからローカル生成するファイル
-data/unit-names.csv
-data/units/*.csv
-
 # Android 配布用にローカル生成するパッケージ
 dist/
