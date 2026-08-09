@@ -55,8 +55,7 @@ end
 local function hasDataFiles(directory)
   return fileExists(directory .. "/units/unit000.csv")
     and fileExists(directory .. "/status-fields.csv")
-    and (fileExists(directory .. "/unit-index.csv")
-      or fileExists(directory .. "/names/Unit_Explanation1_ja.csv"))
+    and fileExists(directory .. "/unit-index.csv")
 end
 
 local function removeTrailingSlash(path)
@@ -257,75 +256,8 @@ local function loadNamesFromIndex()
   return true
 end
 
-local function loadNamesFromExplanations()
-  local sourceId = 1
-  while sourceId <= 4096 do
-    local explanationPath = string.format("%s/names/Unit_Explanation%d_ja.csv", state.dataDirectory, sourceId)
-    local content = readFile(explanationPath)
-    if not content then
-      break
-    end
-
-    local unitId = sourceId - 1
-    local fileName = string.format("unit%03d.csv", unitId)
-    if not fileExists(state.dataDirectory .. "/units/" .. fileName) then
-      return nil, string.format("%s に対応するステータスCSVがありません。", fileName)
-    end
-
-    local formNames = {}
-    local lastFormName = nil
-    for line in content:gmatch("[^\r\n]+") do
-      local columns = splitCsv(line)
-      local formName = trim(columns[1] or "")
-      local description = trim(columns[2] or "")
-      if formName:match("^8%d%d[-_]%d+$") and description:match("^精霊[：:]") then
-        formName = "精霊"
-      end
-      if formName ~= "" then
-        -- 同じ名前で埋められた末尾形態は選択肢へ追加しない。
-        if lastFormName and formName == lastFormName then
-          break
-        end
-        formNames[#formNames + 1] = formName
-        lastFormName = formName
-      end
-    end
-
-    if #formNames == 0 then
-      return nil, string.format("Unit_Explanation%d_ja.csv に形態名がありません。", sourceId)
-    end
-
-    local character = {
-      id = unitId,
-      fileName = fileName,
-      name = formNames[1],
-      forms = {}
-    }
-    for index, formName in ipairs(formNames) do
-      local form = index - 1
-      character.forms[form] = { index = form, label = formName }
-    end
-    state.characters[unitId] = character
-    state.names[#state.names + 1] = character
-    sourceId = sourceId + 1
-  end
-
-  if sourceId > 4096 then
-    return nil, "名前ファイルが多すぎます。"
-  end
-
-  if #state.names == 0 then
-    return nil, "形態名ファイルを読み込めません。"
-  end
-  return true
-end
-
 local function loadNames()
-  if fileExists(state.dataDirectory .. "/unit-index.csv") then
-    return loadNamesFromIndex()
-  end
-  -- 古い配布物は従来方式でも起動できるが、ファイル数が多いため遅い。
-  return loadNamesFromExplanations()
+  return loadNamesFromIndex()
 end
 
 local function loadUnitRows(character)

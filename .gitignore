@@ -1,2 +1,3 @@
 # Android 配布用にローカル生成するパッケージ
 dist/
+data/names/

@@ -56,9 +56,7 @@ if (-not (Test-Path -LiteralPath $SourceDirectory -PathType Container)) {
 }
 
 $unitsDirectory = Join-Path $DestinationDirectory "units"
-$namesDirectory = Join-Path $DestinationDirectory "names"
 New-Item -ItemType Directory -Path $unitsDirectory -Force | Out-Null
-New-Item -ItemType Directory -Path $namesDirectory -Force | Out-Null
 
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $localizedDirectory = Join-Path (Split-Path -Parent $SourceDirectory) "resLocal"
@@ -82,7 +80,6 @@ foreach ($sourceFile in $sourceFiles) {
     if (-not (Test-Path -LiteralPath $explanationPath -PathType Leaf)) {
         throw "形態名ファイルが見つかりません: $explanationPath"
     }
-    Copy-Item -LiteralPath $explanationPath -Destination (Join-Path $namesDirectory $explanationName) -Force
     $explanationCount++
 
     $convertedRows = New-Object System.Collections.Generic.List[string]
@@ -96,7 +93,7 @@ foreach ($sourceFile in $sourceFiles) {
     [System.IO.File]::WriteAllText($targetPath, (($convertedRows -join [Environment]::NewLine) + [Environment]::NewLine), $utf8NoBom)
 }
 
-& (Join-Path $PSScriptRoot "build-unit-index.ps1") -DataDirectory $DestinationDirectory
+& (Join-Path $PSScriptRoot "build-unit-index.ps1") -DataDirectory $DestinationDirectory -NamesDirectory $localizedDirectory
 
 Write-Host ("変換完了: {0} ユニット、{1} 名前ファイル" -f $sourceFiles.Count, $explanationCount)
 Write-Host "出力先: $DestinationDirectory"

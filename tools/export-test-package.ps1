@@ -8,9 +8,6 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $dataDirectory = Join-Path $repositoryRoot "data"
 $scriptPath = Join-Path $repositoryRoot "lua\kbc-status-test.lua"
 
-if (-not (Test-Path -LiteralPath (Join-Path $dataDirectory "names\Unit_Explanation1_ja.csv"))) {
-    throw "先に tools/build-data.ps1 を実行してください。"
-}
 if (-not (Test-Path -LiteralPath (Join-Path $dataDirectory "status-fields.csv"))) {
     throw "data/status-fields.csv が見つかりません。"
 }
@@ -24,7 +21,14 @@ $destinationDataDirectory = Join-Path $DestinationDirectory "data"
 $destinationUnitsDirectory = Join-Path $destinationDataDirectory "units"
 $destinationNamesDirectory = Join-Path $destinationDataDirectory "names"
 New-Item -ItemType Directory -Path $destinationUnitsDirectory -Force | Out-Null
-New-Item -ItemType Directory -Path $destinationNamesDirectory -Force | Out-Null
+if (Test-Path -LiteralPath $destinationNamesDirectory -PathType Container) {
+    $resolvedDataDirectory = [System.IO.Path]::GetFullPath($destinationDataDirectory).TrimEnd('\') + '\'
+    $resolvedNamesDirectory = [System.IO.Path]::GetFullPath($destinationNamesDirectory)
+    if (-not $resolvedNamesDirectory.StartsWith($resolvedDataDirectory, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "削除対象の配布用namesフォルダが不正です: $resolvedNamesDirectory"
+    }
+    Remove-Item -LiteralPath $destinationNamesDirectory -Recurse -Force
+}
 $legacyNameIndex = Join-Path $destinationDataDirectory "unit-names.csv"
 if ([System.IO.File]::Exists($legacyNameIndex)) {
     [System.IO.File]::Delete($legacyNameIndex)
@@ -35,7 +39,5 @@ Copy-Item -LiteralPath (Join-Path $dataDirectory "status-fields.csv") -Destinati
 Copy-Item -LiteralPath (Join-Path $dataDirectory "unit-index.csv") -Destination (Join-Path $destinationDataDirectory "unit-index.csv") -Force
 Get-ChildItem -LiteralPath (Join-Path $dataDirectory "units") -File -Filter "unit*.csv" |
     Copy-Item -Destination $destinationUnitsDirectory -Force
-Get-ChildItem -LiteralPath (Join-Path $dataDirectory "names") -File -Filter "Unit_Explanation*_ja.csv" |
-    Copy-Item -Destination $destinationNamesDirectory -Force
 
 Write-Host "Androidへコピーするフォルダを作成しました: $DestinationDirectory"

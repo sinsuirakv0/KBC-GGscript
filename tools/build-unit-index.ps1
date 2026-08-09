@@ -1,15 +1,18 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$DataDirectory = (Join-Path $PSScriptRoot "..\data")
+    [string]$DataDirectory = (Join-Path $PSScriptRoot "..\data"),
+    [string]$NamesDirectory = ""
 )
 
 $ErrorActionPreference = "Stop"
-$namesDirectory = Join-Path $DataDirectory "names"
+if (-not $NamesDirectory) {
+    $NamesDirectory = Join-Path $DataDirectory "names"
+}
 $unitsDirectory = Join-Path $DataDirectory "units"
 $outputPath = Join-Path $DataDirectory "unit-index.csv"
 
-if (-not (Test-Path -LiteralPath $namesDirectory -PathType Container)) {
-    throw "names フォルダが見つかりません: $namesDirectory"
+if (-not (Test-Path -LiteralPath $NamesDirectory -PathType Container)) {
+    throw "名前CSVフォルダが見つかりません: $NamesDirectory"
 }
 if (-not (Test-Path -LiteralPath $unitsDirectory -PathType Container)) {
     throw "units フォルダが見つかりません: $unitsDirectory"
@@ -21,7 +24,7 @@ function ConvertTo-CsvField {
     return '"' + $Value.Replace('"', '""') + '"'
 }
 
-$sourceFiles = Get-ChildItem -LiteralPath $namesDirectory -File -Filter "Unit_Explanation*_ja.csv" |
+$sourceFiles = Get-ChildItem -LiteralPath $NamesDirectory -File -Filter "Unit_Explanation*_ja.csv" |
     Where-Object { $_.Name -match '^Unit_Explanation(\d+)_ja\.csv$' } |
     Sort-Object { [int][regex]::Match($_.Name, '\d+').Value }
 

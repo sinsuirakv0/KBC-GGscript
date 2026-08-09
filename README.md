@@ -9,7 +9,7 @@ GameGuardian 用のステータス変更スクリプトの実験環境です。`
 
 Lua は変換済み `data/units/unitNNN.csv`、名前・形態を集約した `data/unit-index.csv`、ステータス定義の `data/status-fields.csv` を読む。値の入力は元のCSV値で行い、ネイティブコードで確認した倍率を適用して DWORD に書き込む。倍率がある項目は入力欄に `内部×2` などを表示し、能力の有効・無効だけを持つ項目はチェックボックスで変更できる。
 
-`data` はv15.5.1の復号済みデータから生成済みで、スクリプトの実行に必要な最小限の変換済み値と名前だけを含む。名前だけ更新するときは `data/names` のExplanationファイルを差し替え、`tools/build-unit-index.ps1`を実行する。ステータスも更新するときは、同じバージョンの `DataLocal` と `resLocal` を使って `tools/build-data.ps1` を実行する。この処理では名前索引も自動更新される。
+`data` はv15.5.1の復号済みデータから生成済みで、スクリプトの実行に必要な変換済み値・名前索引・ステータス定義だけを含む。個別の`Unit_Explanation*_ja.csv`は公開リポジトリにもAndroid配布物にも含めない。ステータスを更新するときは、同じバージョンの `DataLocal` と `resLocal` を使って `tools/build-data.ps1` を実行する。この処理では`resLocal`から名前索引も自動更新される。
 
 Android用にまとめた `dist` だけは `.gitignore` で除外している。
 

@@ -2,7 +2,7 @@
 
 ## データ変換
 
-`tools/build-data.ps1` は元の `unit001.csv` を `data/units/unit000.csv` へ変換する。各形態は117列に補完し、ネイティブローダーで確認した既定値と倍率を適用済みの値として保存する。名前と形態名は `resLocal/Unit_ExplanationNNN_ja.csv` を `data/names` へそのままコピーする。
+`tools/build-data.ps1` は元の `unit001.csv` を `data/units/unit000.csv` へ変換する。各形態は117列に補完し、ネイティブローダーで確認した既定値と倍率を適用済みの値として保存する。名前と形態名はローカルの`resLocal/Unit_ExplanationNNN_ja.csv`から`data/unit-index.csv`へ直接集約し、個別のExplanationファイルは公開側へコピーしない。
 
 `tools/build-unit-index.ps1`はExplanation群からキャラ名と有効な形態だけを`data/unit-index.csv`へ集約する。形態名が直前の形態と同一なら、それ以降は未実装形態を埋めるための行と判断して索引へ追加しない。名前が`8xx-1`形式かつ説明文が`精霊：`で始まる場合だけ、表示名を`精霊`とする。ステータスCSV自体はメモリ配置を維持するため、非表示形態を含む全行を保持する。
 
@@ -30,7 +30,7 @@ tableStart + unitId * 0x750 + form * 0x1d4 + column * 4
 
 ## 起動時間
 
-Luaは起動時に871個のExplanationファイルを個別に開かず、生成済みの`unit-index.csv`を1回だけ読む。旧配布物との互換用にExplanation群から読む経路も残すが、索引が存在する場合は使用しない。対応するユニットCSVの存在確認も選択後の読込時まで遅延する。
+Luaは起動時に生成済みの`unit-index.csv`を1回だけ読む。公開・配布側ではExplanation群を必要とせず、対応するユニットCSVの存在確認も選択後の読込時まで遅延する。
 
 メモリアンカーの検索も起動時やキャラ閲覧時には行わず、最初のステータス編集を選んだ時点で実行する。一度確定したアドレスは同じLua実行中の後続編集で再利用する。
 
