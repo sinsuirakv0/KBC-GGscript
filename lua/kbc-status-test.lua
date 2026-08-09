@@ -449,8 +449,11 @@ local function kenkouValidateSaveCharacterTables(tables)
   local ownershipCount = #tables.ownership
   local levelCount = #tables.level
   local formCount = #tables.form
-  local safeCount = math.min(ownershipCount, math.floor(levelCount / 2), formCount)
-  if safeCount < 32 or safeCount > 4096 then
+  if tables.unitCount < 32 or tables.unitCount > 4096 then
+    return false
+  end
+  if ownershipCount ~= tables.unitCount or levelCount ~= tables.unitCount * 2
+    or formCount ~= tables.unitCount then
     return false
   end
   if tables.level[1].address <= tables.ownership[#tables.ownership].address then
@@ -459,19 +462,18 @@ local function kenkouValidateSaveCharacterTables(tables)
   if tables.form[1].address <= tables.level[#tables.level].address then
     return false
   end
-  tables.unitCount = safeCount
   return true
 end
 
-local function kenkouReadSaveRecords(memoryFrom, memoryTo)
-  if memoryTo <= memoryFrom then
-    return {}
+local function kenkouBuildDwordRecords(startAddress, count)
+  local records = {}
+  for index = 0, count - 1 do
+    records[#records + 1] = {
+      address = startAddress + index * 4,
+      flags = gg.TYPE_DWORD
+    }
   end
-  gg.clearResults()
-  gg.searchNumber("0~~0", gg.TYPE_DWORD, false, SIGN_EQUAL, memoryFrom, memoryTo)
-  local results = kenkouGetSortedResults()
-  gg.clearResults()
-  return results
+  return records
 end
 
 local function kenkouFindSaveCharacterTables(anchorAddress, anchorValue)
@@ -495,12 +497,22 @@ local function kenkouFindSaveCharacterTables(anchorAddress, anchorValue)
     return nil
   end
 
-  -- kenkou: 元スクリプトと同じ3分割範囲から、実際のDWORDレコードを取得する。
-  local sectionWidth = (levelEnd - startAddress) / 3
+  -- kenkou: 所持N件とレベル2N件の合計バイト数からNを確定し、値0も含めて全件生成する。
+  local combinedBytes = levelEnd - startAddress + 4
+  if combinedBytes % 12 ~= 0 then
+    return nil
+  end
+  local unitCount = math.floor(combinedBytes / 12)
+  local levelStart = startAddress + unitCount * 4
+  local formStart = levelStart + unitCount * 8
+  if formStart ~= levelEnd + 4 then
+    return nil
+  end
   local tables = {
-    ownership = kenkouReadSaveRecords(startAddress, startAddress + sectionWidth),
-    level = kenkouReadSaveRecords(startAddress + sectionWidth + 4, levelEnd),
-    form = kenkouReadSaveRecords(levelEnd + 4, levelEnd + sectionWidth)
+    ownership = kenkouBuildDwordRecords(startAddress, unitCount),
+    level = kenkouBuildDwordRecords(levelStart, unitCount * 2),
+    form = kenkouBuildDwordRecords(formStart, unitCount),
+    unitCount = unitCount
   }
   if kenkouValidateSaveCharacterTables(tables) then
     return tables
@@ -572,6 +584,7 @@ local function kenkouResolveSaveCharacterTables()
     local tables = kenkouFindSaveCharacterTables(candidate.address, candidate.value)
     if tables then
       state.saveCharacterTables = tables
+      gg.toast(string.format("保存配列を確認しました（%d体）", tables.unitCount))
       return tables
     end
   end
@@ -824,15 +837,17 @@ local function kenkouGetSaveAddresses(character)
   end
   local saveId = character.id + 1
   if saveId < 1 or saveId > tables.unitCount then
-    return nil, string.format("%sの保存IDが配列範囲外です。", character.name)
+    return nil, string.format("%sの保存IDが配列範囲外です（保存ID %d / 配列 %d件）。",
+      character.name, saveId, tables.unitCount)
   end
   local ownershipRecord = tables.ownership[saveId]
   local firstLevelRecord = tables.level[saveId * 2 - 1]
   local secondLevelRecord = tables.level[saveId * 2]
   local formRecord = tables.form[saveId]
   local catOwnershipRecord = tables.ownership[1]
+  local deletedOwnershipRecord = tables.ownership[tables.unitCount]
   if not ownershipRecord or not firstLevelRecord or not secondLevelRecord or not formRecord
-    or not catOwnershipRecord then
+    or not catOwnershipRecord or not deletedOwnershipRecord then
     return nil, string.format("%sの保存レコードを取得できません。", character.name)
   end
   return {
@@ -841,7 +856,8 @@ local function kenkouGetSaveAddresses(character)
     level = firstLevelRecord.address,
     levelMarker = secondLevelRecord.address,
     form = formRecord.address,
-    catOwnership = catOwnershipRecord.address
+    catOwnership = catOwnershipRecord.address,
+    deletedOwnership = deletedOwnershipRecord.address
   }
 end
 
@@ -867,6 +883,42 @@ local function kenkouUnlockCharacter(character)
     }
   })
   gg.toast(character.name .. "を解放しました")
+end
+
+local function kenkouDeleteCharacter(character)
+  local addresses, errorMessage = kenkouGetSaveAddresses(character)
+  if not addresses then
+    gg.alert(errorMessage)
+    return
+  end
+  if addresses.saveId == 1 then
+    gg.alert("ネコは削除できません。")
+    return
+  end
+  if addresses.ownership == addresses.deletedOwnership then
+    gg.alert("このキャラの削除用レコードを取得できません。")
+    return
+  end
+  local confirmation = gg.alert(character.name .. "を削除しますか？", "はい", "いいえ")
+  if confirmation ~= 1 then
+    return
+  end
+  local values = gg.getValues({
+    { address = addresses.deletedOwnership, flags = gg.TYPE_DWORD },
+    { address = addresses.ownership, flags = gg.TYPE_DWORD }
+  })
+  if not values[1] or values[1].value == nil or not values[2] then
+    gg.alert("キャラ削除値を読み取れません。")
+    return
+  end
+  gg.setValues({
+    {
+      address = addresses.ownership,
+      flags = gg.TYPE_DWORD,
+      value = values[1].value
+    }
+  })
+  gg.toast(character.name .. "を削除しました")
 end
 
 local function kenkouDecodeLevel(levelValue, markerValue)
@@ -922,6 +974,10 @@ local function kenkouChangeLevel(character)
     tonumber(currentValues[1].value) or 0,
     tonumber(currentValues[2].value) or 0
   )
+  if not currentLevel then
+    gg.alert(string.format("現在のレベルを復号できません。\n値1: %s\n値2: %s\n初期入力をレベル1＋0で開きます。",
+      tostring(currentValues[1].value), tostring(currentValues[2].value)))
+  end
   currentLevel = currentLevel or 1
   currentPlus = currentPlus or 0
 
@@ -950,7 +1006,7 @@ local function kenkouChangeLevel(character)
     gg.alert("指定値がDWORDの範囲を超えています。")
     return
   end
-  local oddByte = math.floor(encoded / 256) % 2 == 1
+  local oddByte = encoded / 256 % 2 == 1
   local writes = {
     {
       address = addresses.level,
@@ -976,6 +1032,17 @@ local function kenkouChangeLevel(character)
     end
     gg.addListItems(writes)
   end
+  gg.sleep(50)
+  local verifiedValues = gg.getValues({
+    { address = addresses.level, flags = gg.TYPE_DWORD },
+    { address = addresses.levelMarker, flags = gg.TYPE_DWORD }
+  })
+  if not verifiedValues[1] or not verifiedValues[2]
+    or tonumber(verifiedValues[1].value) ~= writes[1].value
+    or tonumber(verifiedValues[2].value) ~= writes[2].value then
+    gg.alert("レベル値を書き込みましたが、直後の確認で値が一致しませんでした。")
+    return
+  end
   gg.toast(string.format("%sをレベル%d＋%dに変更しました%s",
     character.name, level, plus, input[3] == true and "（凍結中）" or ""))
 end
@@ -983,7 +1050,7 @@ end
 local function kenkouOpenSaveEditor(character)
   while true do
     local action = kenkouChooseMenu(
-      { "キャラ解放", "レベル変更", "戻る" },
+      { "キャラ解放", "キャラ削除", "レベル変更", "戻る" },
       character.name .. " / キャラ解放・レベル変更",
       false,
       "kenkou-save-action-" .. character.id
@@ -991,6 +1058,8 @@ local function kenkouOpenSaveEditor(character)
     if action == 1 then
       kenkouUnlockCharacter(character)
     elseif action == 2 then
+      kenkouDeleteCharacter(character)
+    elseif action == 3 then
       kenkouChangeLevel(character)
     else
       return
