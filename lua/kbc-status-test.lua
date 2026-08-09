@@ -4,10 +4,11 @@
 local RECORD_COLUMN_COUNT = 117
 local RECORD_SIZE = 0x1D4
 local UNIT_SIZE = RECORD_SIZE * 4
-local BASE_CAT_COST = 5000
-local BASE_CAT_COST_COLUMN = 6
-local BASE_CAT_COST_OFFSET = BASE_CAT_COST_COLUMN * 4
-local BASE_CAT_PREFIX_COLUMNS = 12
+local ANCHOR_VALUE = 5000
+local ANCHOR_COLUMN = 6
+local ANCHOR_OFFSET = ANCHOR_COLUMN * 4
+local ANCHOR_PREFIX_COLUMNS = 12
+local MAX_ANCHOR_CANDIDATES = 256
 
 local FIELD_LABELS = {
   [0] = "体力", [1] = "KB", [2] = "速度", [3] = "攻撃頻度",
@@ -16,7 +17,7 @@ local FIELD_LABELS = {
 }
 
 local CSV_MULTIPLIERS = {
-  [2] = 2, [4] = 4, [5] = 4, [6] = 100,
+  [2] = 2, [4] = 2, [5] = 4, [6] = 100,
   [7] = 2, [9] = 4, [44] = 4, [45] = 4
 }
 
@@ -26,7 +27,7 @@ local state = {
   names = {},
   characters = {},
   unitTableAddress = nil,
-  baseCatRows = nil
+  anchorRows = nil
 }
 
 local function dirname(path)
@@ -160,19 +161,19 @@ local function loadUnitRows(character)
   return rows
 end
 
-local function getBaseCatRows()
-  if state.baseCatRows then
-    return state.baseCatRows
+local function getAnchorRows()
+  if state.anchorRows then
+    return state.anchorRows
   end
-  local baseCat = state.characters[0]
-  if not baseCat then
-    return nil, "unit000.csv（ネコ）がありません。"
+  local anchorCharacter = state.characters[0]
+  if not anchorCharacter then
+    return nil, "基準CSVがありません。"
   end
-  local rows, errorMessage = loadUnitRows(baseCat)
+  local rows, errorMessage = loadUnitRows(anchorCharacter)
   if not rows or not rows[1] then
-    return nil, errorMessage or "unit000.csv が空です。"
+    return nil, errorMessage or "基準CSVが空です。"
   end
-  state.baseCatRows = rows
+  state.anchorRows = rows
   return rows
 end
 
@@ -181,17 +182,26 @@ local function getAddressValue(address)
   return values[1] and tonumber(values[1].value) or nil
 end
 
-local function verifyBaseCatCandidate(recordAddress, baseCatRows)
-  -- 1形態だけでなく、続く形態の先頭12項目まで照合する。
-  -- これで同じコスト値を持つ別ユニットを基準にしてしまうことを防ぐ。
-  local formCount = math.min(#baseCatRows, 3)
+local function verifyAnchorCandidate(recordAddress, anchorRows)
+  -- 複数形態をまとめて読み、同じ先頭値を持つ別レコードを除外する。
+  local requests = {}
+  local expectedValues = {}
+  local formCount = math.min(#anchorRows, 3)
   for formIndex = 1, formCount do
-    local row = baseCatRows[formIndex]
-    for column = 1, BASE_CAT_PREFIX_COLUMNS do
-      local actualValue = getAddressValue(recordAddress + (formIndex - 1) * RECORD_SIZE + (column - 1) * 4)
-      if actualValue ~= row[column] then
-        return false
-      end
+    local row = anchorRows[formIndex]
+    for column = 1, ANCHOR_PREFIX_COLUMNS do
+      requests[#requests + 1] = {
+        address = recordAddress + (formIndex - 1) * RECORD_SIZE + (column - 1) * 4,
+        flags = gg.TYPE_DWORD
+      }
+      expectedValues[#expectedValues + 1] = row[column]
+    end
+  end
+
+  local actualValues = gg.getValues(requests)
+  for index, expectedValue in ipairs(expectedValues) do
+    if not actualValues[index] or tonumber(actualValues[index].value) ~= expectedValue then
+      return false
     end
   end
   return true
@@ -202,34 +212,33 @@ local function findUnitTableAddress()
     return state.unitTableAddress
   end
 
-  local baseCatRows, errorMessage = getBaseCatRows()
-  if not baseCatRows then
+  local anchorRows, errorMessage = getAnchorRows()
+  if not anchorRows then
     return nil, errorMessage
   end
 
   gg.clearResults()
   gg.setRanges(gg.REGION_C_BSS)
-  gg.searchNumber(BASE_CAT_COST, gg.TYPE_DWORD)
+  gg.searchNumber(ANCHOR_VALUE, gg.TYPE_DWORD)
   local resultCount = gg.getResultsCount()
   if resultCount == 0 then
     gg.clearResults()
-    return nil, "5000 が見つかりません。にゃんこ大戦争を起動し、対象プロセスを選んでください。"
+    return nil, "ステータスデータを取得できません。対象アプリとデータバージョンを確認してください。"
   end
 
-  local results = gg.getResults(math.min(resultCount, 100000))
+  local results = gg.getResults(math.min(resultCount, MAX_ANCHOR_CANDIDATES))
   gg.clearResults()
   table.sort(results, function(left, right) return left.address < right.address end)
 
   for _, result in ipairs(results) do
-    local recordAddress = result.address - BASE_CAT_COST_OFFSET
-    if verifyBaseCatCandidate(recordAddress, baseCatRows) then
+    local recordAddress = result.address - ANCHOR_OFFSET
+    if verifyAnchorCandidate(recordAddress, anchorRows) then
       state.unitTableAddress = recordAddress
-      gg.toast(string.format("ネコを確認: 0x%X", recordAddress))
       return recordAddress
     end
   end
 
-  return nil, "最初の5000候補をネコの連続データとして確認できませんでした。ゲームのバージョンとdataが一致しているか確認してください。"
+  return nil, "ステータスデータの照合に失敗しました。ゲームとdataを同じバージョンにしてください。"
 end
 
 local function chooseFromList(characters)
@@ -399,18 +408,14 @@ local function main()
     return
   end
 
-  gg.alert("KBC ステータス変更テスト\n\n一覧または名前検索でキャラと形態を選択します。\n初回はネコ第1形態を使い、5000の最初の候補を連続データで照合して位置を確定します。")
   while true do
-    local action = gg.choice({ "一覧から選ぶ", "キャラ名で検索", "ネコの位置だけ確認", "終了" }, nil, "KBC ステータス変更")
+    local action = gg.choice({ "一覧から選ぶ", "キャラ名で検索", "終了" }, nil, "KBC ステータス変更")
     if action == 1 then
       local character = chooseFromList(state.names)
       if character then openCharacter(character) end
     elseif action == 2 then
       local character = chooseByName(state.names)
       if character then openCharacter(character) end
-    elseif action == 3 then
-      local _, addressError = findUnitTableAddress()
-      if addressError then gg.alert(addressError) end
     else
       return
     end
