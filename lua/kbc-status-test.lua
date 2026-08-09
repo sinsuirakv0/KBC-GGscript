@@ -16,6 +16,13 @@ local SAVE_RESULT_BATCH_SIZE = 6000
 local MAX_SAVE_BASE_RESULTS = 4096
 local MAX_SAVE_BASE_VERIFICATIONS = 8
 local MAX_SAVE_TABLE_CANDIDATES = 8
+local MAX_OWNERSHIP_START_CANDIDATES = 256
+local OWNERSHIP_STRIDE = 4
+local LEVEL_STRIDE = 8
+local FORM_STRIDE = 4
+local OWNERSHIP_LEVEL_GAP = 4
+local MAX_LEVEL_COMPONENT = 50000
+local UINT32_MODULUS = 4294967296
 local SIGN_EQUAL = gg.SIGN_EQUAL or 536870912
 
 local state = {
@@ -24,6 +31,7 @@ local state = {
   fields = {},
   names = {},
   characters = {},
+  characterCount = nil,
   unitTableAddress = nil,
   anchorRows = nil,
   saveBaseAddress = nil,
@@ -227,6 +235,7 @@ local function loadNamesFromIndex()
   end
 
   local lineNumber = 0
+  local maxUnitId = -1
   for line in content:gmatch("[^\r\n]+") do
     lineNumber = lineNumber + 1
     if lineNumber > 1 then
@@ -234,9 +243,11 @@ local function loadNamesFromIndex()
       local unitId = tonumber(columns[1])
       local formIndex = tonumber(columns[2])
       local formName = trim(columns[3] or "")
-      if not unitId or not formIndex or formName == "" then
+      if not unitId or unitId < 0 or unitId % 1 ~= 0
+        or not formIndex or formIndex < 0 or formIndex % 1 ~= 0 or formName == "" then
         return nil, string.format("unit-index.csv の%d行目が不正です。", lineNumber)
       end
+      maxUnitId = math.max(maxUnitId, unitId)
 
       local character = state.characters[unitId]
       if not character then
@@ -262,6 +273,13 @@ local function loadNamesFromIndex()
   if #state.names == 0 then
     return nil, "unit-index.csv にキャラ名がありません。"
   end
+  for unitId = 0, maxUnitId do
+    if not state.characters[unitId] then
+      return nil, string.format("unit-index.csv にunit %dがありません。キャラIDを連続させてください。", unitId)
+    end
+  end
+  -- kenkou: 保存配列の件数は索引の最大ID+1とし、アプデ時はデータ更新だけで追従する。
+  state.characterCount = maxUnitId + 1
   return true
 end
 
@@ -445,77 +463,185 @@ local function kenkouResolveSaveBaseAddress()
   return nil, "保存領域の基準候補を検証できません。"
 end
 
-local function kenkouValidateSaveCharacterTables(tables)
-  local ownershipCount = #tables.ownership
-  local levelCount = #tables.level
-  local formCount = #tables.form
-  if tables.unitCount < 32 or tables.unitCount > 4096 then
-    return false
-  end
-  if ownershipCount ~= tables.unitCount or levelCount ~= tables.unitCount * 2
-    or formCount ~= tables.unitCount then
-    return false
-  end
-  if tables.level[1].address <= tables.ownership[#tables.ownership].address then
-    return false
-  end
-  if tables.form[1].address <= tables.level[#tables.level].address then
-    return false
-  end
-  return true
-end
-
-local function kenkouBuildDwordRecords(startAddress, count)
+local function kenkouBuildDwordRecords(startAddress, count, stride)
+  stride = stride or 4
   local records = {}
   for index = 0, count - 1 do
     records[#records + 1] = {
-      address = startAddress + index * 4,
+      address = startAddress + index * stride,
       flags = gg.TYPE_DWORD
     }
   end
   return records
 end
 
+local function kenkouToUnsignedDword(value)
+  value = tonumber(value)
+  if not value then
+    return nil
+  end
+  value = math.floor(value) % UINT32_MODULUS
+  if value < 0 then
+    value = value + UINT32_MODULUS
+  end
+  return value
+end
+
+local function kenkouToSignedDword(value)
+  value = kenkouToUnsignedDword(value)
+  if not value then
+    return nil
+  end
+  if value >= 2147483648 then
+    return value - UINT32_MODULUS
+  end
+  return value
+end
+
+local function kenkouGetDwordByte(value, byteIndex)
+  return math.floor(value / (256 ^ byteIndex)) % 256
+end
+
+local function kenkouXorByte(left, right)
+  local result = 0
+  local place = 1
+  for _ = 1, 8 do
+    if left % 2 ~= right % 2 then
+      result = result + place
+    end
+    left = math.floor(left / 2)
+    right = math.floor(right / 2)
+    place = place * 2
+  end
+  return result
+end
+
+local function kenkouDecodeLevel(levelValue, markerValue)
+  local encoded = kenkouToUnsignedDword(levelValue)
+  local marker = kenkouToUnsignedDword(markerValue)
+  if not encoded or not marker then
+    return nil, nil
+  end
+
+  -- kenkou: 8バイト保護値をネイティブFUN_007ae66cと同じ並びで復号する。
+  local packed = kenkouXorByte(kenkouGetDwordByte(encoded, 0), kenkouGetDwordByte(marker, 3))
+    + kenkouXorByte(kenkouGetDwordByte(encoded, 1), kenkouGetDwordByte(marker, 2)) * 256
+    + kenkouXorByte(kenkouGetDwordByte(encoded, 2), kenkouGetDwordByte(marker, 1)) * 65536
+    + kenkouXorByte(kenkouGetDwordByte(encoded, 3), kenkouGetDwordByte(marker, 0)) * 16777216
+  return math.floor(packed / 65536) + 1, packed % 65536
+end
+
+local function kenkouEncodeLevel(level, plus, markerValue)
+  local marker = kenkouToUnsignedDword(markerValue)
+  if not marker then
+    return nil, nil
+  end
+  local packed = (level - 1) * 65536 + plus
+  local byte0 = kenkouXorByte(kenkouGetDwordByte(packed, 0), kenkouGetDwordByte(marker, 3))
+  local byte1 = kenkouXorByte(kenkouGetDwordByte(packed, 1), kenkouGetDwordByte(marker, 2))
+  local byte2 = kenkouXorByte(kenkouGetDwordByte(packed, 2), kenkouGetDwordByte(marker, 1))
+  local byte3 = kenkouXorByte(kenkouGetDwordByte(packed, 3), kenkouGetDwordByte(marker, 0))
+  local encoded = byte0 + byte1 * 256 + byte2 * 65536 + byte3 * 16777216
+  return kenkouToSignedDword(encoded), kenkouToSignedDword(marker)
+end
+
+local function kenkouGetValidationIndexes(unitCount)
+  local indexes = {}
+  local seen = {}
+  local candidates = {
+    1, 2, 3, 4, 8, 16, 32, 64, 128,
+    math.floor(unitCount / 3), math.floor(unitCount / 2), math.floor(unitCount * 2 / 3),
+    unitCount - 2, unitCount - 1, unitCount
+  }
+  for _, index in ipairs(candidates) do
+    index = math.max(1, math.min(unitCount, index))
+    if not seen[index] then
+      seen[index] = true
+      indexes[#indexes + 1] = index
+    end
+  end
+  return indexes
+end
+
+local function kenkouValidateSaveCharacterTables(tables)
+  local unitCount = tables.unitCount
+  if not state.characterCount or unitCount ~= state.characterCount
+    or unitCount < 32 or unitCount > 4096 then
+    return false
+  end
+  if #tables.ownership ~= unitCount or #tables.level ~= unitCount * 2
+    or #tables.form ~= unitCount then
+    return false
+  end
+
+  local ownershipStart = tables.ownership[1].address
+  local expectedLevelStart = ownershipStart + unitCount * OWNERSHIP_STRIDE + OWNERSHIP_LEVEL_GAP
+  local expectedFormStart = expectedLevelStart + unitCount * LEVEL_STRIDE
+  if tables.level[1].address ~= expectedLevelStart or tables.form[1].address ~= expectedFormStart then
+    return false
+  end
+
+  -- kenkou: 離れたIDを読み、所持・レベル・形態が同時に妥当な候補だけを採用する。
+  local requests = {}
+  local validationIndexes = kenkouGetValidationIndexes(unitCount)
+  for _, saveId in ipairs(validationIndexes) do
+    requests[#requests + 1] = tables.ownership[saveId]
+    requests[#requests + 1] = tables.level[saveId * 2 - 1]
+    requests[#requests + 1] = tables.level[saveId * 2]
+    requests[#requests + 1] = tables.form[saveId]
+  end
+  local values = gg.getValues(requests)
+  for index = 1, #validationIndexes do
+    local offset = (index - 1) * 4
+    local ownership = values[offset + 1] and tonumber(values[offset + 1].value)
+    local levelValue = values[offset + 2] and values[offset + 2].value
+    local markerValue = values[offset + 3] and values[offset + 3].value
+    local form = values[offset + 4] and tonumber(values[offset + 4].value)
+    if not ownership or ownership < -257 or ownership > 256
+      or not form or form < -1 or form > 10 then
+      return false
+    end
+    if validationIndexes[index] == 1 and ownership ~= 1 then
+      return false
+    end
+    local level, plus = kenkouDecodeLevel(levelValue, markerValue)
+    if not level or level < 1 or level - 1 > MAX_LEVEL_COMPONENT
+      or not plus or plus < 0 or plus > MAX_LEVEL_COMPONENT then
+      return false
+    end
+  end
+  return true
+end
+
 local function kenkouFindSaveCharacterTables(anchorAddress, anchorValue)
+  local unitCount = state.characterCount
+  if not unitCount then
+    return nil
+  end
   anchorValue = math.floor(anchorValue)
   gg.clearResults()
   gg.searchNumber(string.format("%d~%d", anchorValue - 1, anchorValue + 1), gg.TYPE_DWORD, false,
-    SIGN_EQUAL, anchorAddress - 0x500, anchorAddress + SAVE_ANALYSIS_WINDOW)
-  local startResults = gg.getResultsCount() > 0 and gg.getResults(1) or {}
+    SIGN_EQUAL, anchorAddress - unitCount * OWNERSHIP_STRIDE - 0x100,
+    anchorAddress + math.max(0x500, SAVE_ANALYSIS_WINDOW))
+  local startResultCount = gg.getResultsCount()
+  local startResults = startResultCount > 0
+    and gg.getResults(math.min(startResultCount, MAX_OWNERSHIP_START_CANDIDATES)) or {}
   gg.clearResults()
-  local startAddress = startResults[1] and startResults[1].address or nil
-  if not startAddress then
-    return nil
-  end
+  table.sort(startResults, function(left, right) return left.address < right.address end)
 
-  gg.searchNumber("0~10", gg.TYPE_DWORD, false, SIGN_EQUAL, anchorAddress,
-    anchorAddress + SAVE_ANALYSIS_WINDOW)
-  local endResults = gg.getResultsCount() > 0 and gg.getResults(1) or {}
-  gg.clearResults()
-  local levelEnd = endResults[1] and (endResults[1].address - 4) or nil
-  if not levelEnd or levelEnd <= startAddress then
-    return nil
-  end
-
-  -- kenkou: 所持N件とレベル2N件の合計バイト数からNを確定し、値0も含めて全件生成する。
-  local combinedBytes = levelEnd - startAddress + 4
-  if combinedBytes % 12 ~= 0 then
-    return nil
-  end
-  local unitCount = math.floor(combinedBytes / 12)
-  local levelStart = startAddress + unitCount * 4
-  local formStart = levelStart + unitCount * 8
-  if formStart ~= levelEnd + 4 then
-    return nil
-  end
-  local tables = {
-    ownership = kenkouBuildDwordRecords(startAddress, unitCount),
-    level = kenkouBuildDwordRecords(levelStart, unitCount * 2),
-    form = kenkouBuildDwordRecords(formStart, unitCount),
-    unitCount = unitCount
-  }
-  if kenkouValidateSaveCharacterTables(tables) then
-    return tables
+  for _, startResult in ipairs(startResults) do
+    local startAddress = startResult.address
+    local levelStart = startAddress + unitCount * OWNERSHIP_STRIDE + OWNERSHIP_LEVEL_GAP
+    local formStart = levelStart + unitCount * LEVEL_STRIDE
+    local tables = {
+      ownership = kenkouBuildDwordRecords(startAddress, unitCount, OWNERSHIP_STRIDE),
+      level = kenkouBuildDwordRecords(levelStart, unitCount * 2, LEVEL_STRIDE / 2),
+      form = kenkouBuildDwordRecords(formStart, unitCount, FORM_STRIDE),
+      unitCount = unitCount
+    }
+    if kenkouValidateSaveCharacterTables(tables) then
+      return tables
+    end
   end
   return nil
 end
@@ -845,9 +971,8 @@ local function kenkouGetSaveAddresses(character)
   local secondLevelRecord = tables.level[saveId * 2]
   local formRecord = tables.form[saveId]
   local catOwnershipRecord = tables.ownership[1]
-  local deletedOwnershipRecord = tables.ownership[tables.unitCount]
   if not ownershipRecord or not firstLevelRecord or not secondLevelRecord or not formRecord
-    or not catOwnershipRecord or not deletedOwnershipRecord then
+    or not catOwnershipRecord then
     return nil, string.format("%sの保存レコードを取得できません。", character.name)
   end
   return {
@@ -856,8 +981,7 @@ local function kenkouGetSaveAddresses(character)
     level = firstLevelRecord.address,
     levelMarker = secondLevelRecord.address,
     form = formRecord.address,
-    catOwnership = catOwnershipRecord.address,
-    deletedOwnership = deletedOwnershipRecord.address
+    catOwnership = catOwnershipRecord.address
   }
 end
 
@@ -895,46 +1019,36 @@ local function kenkouDeleteCharacter(character)
     gg.alert("ネコは削除できません。")
     return
   end
-  if addresses.ownership == addresses.deletedOwnership then
-    gg.alert("このキャラの削除用レコードを取得できません。")
-    return
-  end
   local confirmation = gg.alert(character.name .. "を削除しますか？", "はい", "いいえ")
   if confirmation ~= 1 then
     return
   end
   local values = gg.getValues({
-    { address = addresses.deletedOwnership, flags = gg.TYPE_DWORD },
+    { address = addresses.catOwnership, flags = gg.TYPE_DWORD },
     { address = addresses.ownership, flags = gg.TYPE_DWORD }
   })
   if not values[1] or values[1].value == nil or not values[2] then
     gg.alert("キャラ削除値を読み取れません。")
     return
   end
+  local unlockedValue = tonumber(values[1].value)
+  local currentValue = tonumber(values[2].value)
+  if not unlockedValue or not currentValue then
+    gg.alert("キャラ所持値を判定できません。")
+    return
+  end
+  if currentValue ~= unlockedValue then
+    gg.toast(character.name .. "は既に未所持です")
+    return
+  end
   gg.setValues({
     {
       address = addresses.ownership,
       flags = gg.TYPE_DWORD,
-      value = values[1].value
+      value = 0
     }
   })
   gg.toast(character.name .. "を削除しました")
-end
-
-local function kenkouDecodeLevel(levelValue, markerValue)
-  local adjustment
-  if markerValue == 131072 then
-    adjustment = 512
-  elseif markerValue == 65536 then
-    adjustment = 256
-  else
-    return nil, nil
-  end
-  local encoded = levelValue - adjustment
-  if encoded < 0 then
-    return nil, nil
-  end
-  return math.floor(encoded / 65536) + 1, encoded % 65536
 end
 
 local function kenkouRemoveLevelListItems(addresses)
@@ -996,29 +1110,33 @@ local function kenkouChangeLevel(character)
     gg.alert("レベルは1以上の整数で入力してください。")
     return
   end
-  if not plus or plus % 1 ~= 0 or plus < 0 or plus > 65535 then
-    gg.alert("プラス値は0〜65535の整数で入力してください。")
+  if level - 1 > MAX_LEVEL_COMPONENT then
+    gg.alert(string.format("レベルは%d以下で入力してください。", MAX_LEVEL_COMPONENT + 1))
+    return
+  end
+  if not plus or plus % 1 ~= 0 or plus < 0 or plus > MAX_LEVEL_COMPONENT then
+    gg.alert(string.format("プラス値は0〜%dの整数で入力してください。", MAX_LEVEL_COMPONENT))
     return
   end
 
-  local encoded = (level - 1) * 65536 + plus
-  if encoded > 2147483647 then
-    gg.alert("指定値がDWORDの範囲を超えています。")
+  -- kenkou: 現在のランダムマスクを保持し、先頭DWORDだけを新しいpacked値へ合わせる。
+  local encodedValue, markerValue = kenkouEncodeLevel(level, plus, currentValues[2].value)
+  if encodedValue == nil or markerValue == nil then
+    gg.alert("レベル値をエンコードできません。")
     return
   end
-  local oddByte = encoded / 256 % 2 == 1
   local writes = {
     {
       address = addresses.level,
       flags = gg.TYPE_DWORD,
-      value = encoded + (oddByte and 512 or 256),
+      value = encodedValue,
       name = string.format("%03d %s | レベル", character.id, character.name)
     },
     {
       address = addresses.levelMarker,
       flags = gg.TYPE_DWORD,
-      value = oddByte and 131072 or 65536,
-      name = string.format("%03d %s | レベル識別値", character.id, character.name)
+      value = markerValue,
+      name = string.format("%03d %s | レベルマスク", character.id, character.name)
     }
   }
 
