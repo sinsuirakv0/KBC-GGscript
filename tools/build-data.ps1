@@ -82,6 +82,16 @@ function Get-ExplanationNames {
     return $names
 }
 
+function Convert-DisplayName {
+    param([string]$Name)
+
+    $normalizedName = $Name.Trim()
+    if ($normalizedName -eq "8") {
+        return "精霊"
+    }
+    return $normalizedName
+}
+
 if (-not (Test-Path -LiteralPath $SourceDirectory -PathType Container)) {
     throw "DataLocal が見つかりません: $SourceDirectory"
 }
@@ -110,7 +120,10 @@ foreach ($sourceFile in $sourceFiles) {
     $explanationNames = Get-ExplanationNames -Path $explanationPath
     $fallbackName = Get-UnitName -Line $sourceLines[0] -Fallback ("ユニット {0}" -f $unitId)
     $baseName = if ($explanationNames.Count -gt 0) { $explanationNames[0] } else { $fallbackName }
+    $baseName = Convert-DisplayName -Name $baseName
     $convertedRows = New-Object System.Collections.Generic.List[string]
+    $lastVisibleFormName = $null
+    $visibleFormsEnded = $false
     for ($form = 0; $form -lt $sourceLines.Count; $form++) {
         if (-not $sourceLines[$form].Trim()) {
             continue
@@ -121,7 +134,17 @@ foreach ($sourceFile in $sourceFiles) {
         } else {
             "{0}（第{1}形態）" -f $baseName, ($form + 1)
         }
-        $nameRows.Add(("{0},{1},{2},{3},{4}" -f $unitId, $targetName, $form, $baseName, $formName))
+        $formName = Convert-DisplayName -Name $formName
+
+        # 最終形態名を埋めるための重複行は、選択肢には含めない。
+        if (-not $visibleFormsEnded) {
+            if ($form -gt 0 -and $formName -eq $lastVisibleFormName) {
+                $visibleFormsEnded = $true
+            } else {
+                $nameRows.Add(("{0},{1},{2},{3},{4}" -f $unitId, $targetName, $form, $baseName, $formName))
+                $lastVisibleFormName = $formName
+            }
+        }
     }
 
     [System.IO.File]::WriteAllText($targetPath, (($convertedRows -join [Environment]::NewLine) + [Environment]::NewLine), $utf8NoBom)
