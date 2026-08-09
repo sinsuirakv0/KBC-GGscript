@@ -4,7 +4,7 @@ GameGuardian 用のステータス変更スクリプトの実験環境です。`
 
 ## 使用手順
 
-1. 同梱の `data` と `lua` を含むフォルダを端末の Download などへコピーする。
+1. リポジトリをフォルダごと取得し、同梱の `data` と `lua` を含むフォルダを端末の Download などへコピーする。`lua` ファイル単体では動かない。
 2. GameGuardian でにゃんこ大戦争を対象にしてから、`lua/kbc-status-test.lua` を実行する。
 
 Lua は `unit-names.csv` と変換済み `data/units/unitNNN.csv` を読む。値の入力は元のCSV値で行い、ネイティブコードで確認した倍率を適用して DWORD に書き込む。

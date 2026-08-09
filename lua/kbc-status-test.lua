@@ -47,6 +47,19 @@ local function readFile(path)
   return content
 end
 
+local function hasNameIndex(directory)
+  local file = io.open(directory .. "/unit-names.csv", "r")
+  if not file then
+    return false
+  end
+  file:close()
+  return true
+end
+
+local function removeTrailingSlash(path)
+  return (path:gsub("/+$", ""))
+end
+
 local function splitCsv(line)
   local values = {}
   for value in (line .. ","):gmatch("(.-),") do
@@ -71,7 +84,33 @@ local function initializePaths()
   if not state.rootDirectory then
     return nil, "実行フォルダを取得できません。"
   end
-  state.dataDirectory = state.rootDirectory .. "/data"
+
+  local candidates = {
+    state.rootDirectory .. "/data",
+    scriptDirectory .. "/data",
+    "/storage/emulated/0/Download/KBC-rakv0-status-script/data",
+    "/sdcard/Download/KBC-rakv0-status-script/data"
+  }
+  for _, directory in ipairs(candidates) do
+    if hasNameIndex(directory) then
+      state.dataDirectory = directory
+      return true
+    end
+  end
+
+  local selection = gg.prompt(
+    { "unit-names.csv がある data フォルダのフルパス" },
+    { "/storage/emulated/0/Download/KBC-rakv0-status-script/data" },
+    { "text" }
+  )
+  if not selection then
+    return nil, "data フォルダが指定されませんでした。"
+  end
+  local directory = removeTrailingSlash(trim(selection[1] or ""))
+  if directory == "" or not hasNameIndex(directory) then
+    return nil, "unit-names.csv を取得できません。data フォルダ全体をコピーして指定してください。"
+  end
+  state.dataDirectory = directory
   return true
 end
 
