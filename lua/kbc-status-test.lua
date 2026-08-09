@@ -9,7 +9,10 @@ local ANCHOR_COLUMN = 6
 local ANCHOR_OFFSET = ANCHOR_COLUMN * 4
 local ANCHOR_PREFIX_COLUMNS = 12
 local MAX_ANCHOR_CANDIDATES = 256
-local KENKOU_DIVIDER = " ─────────"
+local SAVE_SEARCH_START_OFFSET = 0x2100
+local SAVE_SEARCH_END_OFFSET = 0xFFFFF
+local SAVE_ANALYSIS_WINDOW = 0x6400
+local SIGN_EQUAL = gg.SIGN_EQUAL or 536870912
 
 local state = {
   rootDirectory = nil,
@@ -18,7 +21,9 @@ local state = {
   names = {},
   characters = {},
   unitTableAddress = nil,
-  anchorRows = nil
+  anchorRows = nil,
+  saveBaseAddress = nil,
+  saveCharacterTables = nil
 }
 
 local kenkouUi = {
@@ -353,6 +358,214 @@ local function findUnitTableAddress()
   return nil, "ステータスデータの照合に失敗しました。ゲームとdataを同じバージョンにしてください。"
 end
 
+local function kenkouGetSortedResults(limit)
+  local resultCount = gg.getResultsCount()
+  if resultCount == 0 then
+    return {}
+  end
+  local results = gg.getResults(math.min(resultCount, limit or resultCount))
+  table.sort(results, function(left, right) return left.address < right.address end)
+  return results
+end
+
+local function kenkouVerifySaveBaseCandidate(address)
+  gg.clearResults()
+  local pattern = ("-256~255;"):rep(2) .. ("-257~~256;"):rep(2) .. "-256~255;-256~255::21"
+  gg.searchNumber(pattern, gg.TYPE_DWORD, false, SIGN_EQUAL, address, address + 0x120)
+  local valid = gg.getResultsCount() == 6
+  gg.clearResults()
+  return valid
+end
+
+local function kenkouResolveSaveBaseAddress()
+  if state.saveBaseAddress then
+    return state.saveBaseAddress
+  end
+
+  -- kenkou: 元スクリプトのsetup.luaが取得していた時差値をローカルで組み立てる。
+  local currentTime = os.time()
+  local timezoneSeconds = math.floor(os.difftime(currentTime, os.time(os.date("!*t", currentTime))))
+  local timezoneHex = string.format("%08x", timezoneSeconds % 4294967296)
+  local bytes = {}
+  for byte in timezoneHex:gmatch("%x%x") do
+    table.insert(bytes, 1, byte)
+  end
+  local timezonePattern = "h " .. table.concat(bytes, " ")
+
+  local splitRanges = gg.getRangesList("split_config.arm64_v8a.apk:bss") or {}
+  local splitRange = splitRanges[1]
+  local memoryFrom = splitRange and splitRange.start or 0
+  local memoryTo = splitRange and (splitRange.start + 0xFFFF) or -1
+  gg.clearResults()
+  gg.setRanges(splitRange and -2080896 or (gg.REGION_C_BSS or 48))
+  gg.searchNumber(timezonePattern, gg.TYPE_BYTE, false, SIGN_EQUAL, memoryFrom, memoryTo)
+  if gg.getResultsCount() == 0 then
+    gg.clearResults()
+    return nil, "保存領域の基準値を取得できません。アプリを再起動してから再試行してください。"
+  end
+
+  local firstResult = gg.getResults(1)[1]
+  if not firstResult then
+    gg.clearResults()
+    return nil, "保存領域の基準候補を取得できません。"
+  end
+  gg.refineNumber(firstResult.value, gg.TYPE_BYTE)
+  local results = kenkouGetSortedResults()
+  gg.clearResults()
+
+  for index, result in ipairs(results) do
+    if not results[index + 2] then
+      state.saveBaseAddress = result.address
+      return result.address
+    end
+    local gap = results[index + 2].address - results[index + 1].address
+    if gap > 0x3000 and gap < 0x4FFF and kenkouVerifySaveBaseCandidate(result.address) then
+      state.saveBaseAddress = result.address
+      return result.address
+    end
+  end
+  return nil, "保存領域の基準候補を検証できません。"
+end
+
+local function kenkouGetRequiredSaveUnitCount()
+  local requiredCount = 0
+  for _, character in ipairs(state.names) do
+    requiredCount = math.max(requiredCount, character.id + 1)
+  end
+  return requiredCount
+end
+
+local function kenkouValidateSaveCharacterTables(tables)
+  local requiredCount = kenkouGetRequiredSaveUnitCount()
+  if tables.unitCount < requiredCount or tables.unitCount > 4096 then
+    return false
+  end
+  if tables.levelStart ~= tables.ownershipStart + tables.unitCount * 4 then
+    return false
+  end
+  if tables.formStart ~= tables.levelStart + tables.unitCount * 8 then
+    return false
+  end
+
+  -- kenkou: 先頭16体を読み、別配列への誤認を防いでから書き込みを許可する。
+  local sampleCount = math.min(16, tables.unitCount)
+  local requests = {}
+  for saveId = 1, sampleCount do
+    requests[#requests + 1] = {
+      address = tables.ownershipStart + (saveId - 1) * 4,
+      flags = gg.TYPE_DWORD
+    }
+    requests[#requests + 1] = {
+      address = tables.levelStart + (saveId - 1) * 8 + 4,
+      flags = gg.TYPE_DWORD
+    }
+    requests[#requests + 1] = {
+      address = tables.formStart + (saveId - 1) * 4,
+      flags = gg.TYPE_DWORD
+    }
+  end
+  local values = gg.getValues(requests)
+  if #values ~= #requests then
+    return false
+  end
+
+  local validLevelMarkers = 0
+  for index = 1, #values, 3 do
+    local ownershipValue = tonumber(values[index].value)
+    local levelMarker = tonumber(values[index + 1].value)
+    local formValue = tonumber(values[index + 2].value)
+    if not ownershipValue or ownershipValue < -257 or ownershipValue > 256 then
+      return false
+    end
+    if not formValue or formValue < -1 or formValue > 10 or formValue % 1 ~= 0 then
+      return false
+    end
+    if levelMarker == 0 or levelMarker == 65536 or levelMarker == 131072 then
+      validLevelMarkers = validLevelMarkers + 1
+    end
+  end
+  return validLevelMarkers >= math.min(4, sampleCount)
+end
+
+local function kenkouFindSaveCharacterTables(anchorAddress, anchorValue)
+  anchorValue = math.floor(anchorValue)
+  gg.clearResults()
+  gg.searchNumber(string.format("%d~%d", anchorValue - 1, anchorValue + 1), gg.TYPE_DWORD, false,
+    SIGN_EQUAL, anchorAddress - 0x500, anchorAddress + SAVE_ANALYSIS_WINDOW)
+  local startResults = kenkouGetSortedResults()
+  gg.clearResults()
+  local startAddress = startResults[1] and startResults[1].address or nil
+  if not startAddress then
+    return nil
+  end
+
+  gg.searchNumber("0~10", gg.TYPE_DWORD, false, SIGN_EQUAL, anchorAddress,
+    anchorAddress + SAVE_ANALYSIS_WINDOW)
+  local endResults = kenkouGetSortedResults()
+  gg.clearResults()
+
+  for _, endResult in ipairs(endResults) do
+    local levelEnd = endResult.address - 4
+    local combinedBytes = levelEnd - startAddress + 4
+    if combinedBytes > 0 and combinedBytes % 12 == 0 then
+      local unitCount = math.floor(combinedBytes / 12)
+      local tables = {
+        ownershipStart = startAddress,
+        levelStart = startAddress + unitCount * 4,
+        formStart = startAddress + unitCount * 12,
+        unitCount = unitCount
+      }
+      if kenkouValidateSaveCharacterTables(tables) then
+        return tables
+      end
+    end
+  end
+  return nil
+end
+
+local function kenkouResolveSaveCharacterTables()
+  if state.saveCharacterTables then
+    return state.saveCharacterTables
+  end
+  local baseAddress, baseError = kenkouResolveSaveBaseAddress()
+  if not baseAddress then
+    return nil, baseError
+  end
+
+  gg.clearResults()
+  local pattern = "-257~~256" .. (";-257~~256"):rep(63) .. ":253"
+  gg.searchNumber(pattern, gg.TYPE_DWORD, false, SIGN_EQUAL,
+    baseAddress + SAVE_SEARCH_START_OFFSET, baseAddress + SAVE_SEARCH_END_OFFSET)
+  local results = kenkouGetSortedResults()
+  gg.clearResults()
+  if #results < 16 then
+    return nil, "キャラ保存状態の配列候補が見つかりません。"
+  end
+
+  local cachedValue = nil
+  for index = 1, #results - 15, 120 do
+    local current = results[index]
+    local comparable = cachedValue
+      and math.abs((tonumber(current.value) or 0) - (tonumber(results[index + 3].value) or 0)) < 2
+      and math.abs((tonumber(results[index + 10].value) or 0) - (tonumber(results[index + 15].value) or 0)) < 2
+    if comparable then
+      if cachedValue ~= results[index + 14].value then
+        cachedValue = current.value
+      else
+        local tables = kenkouFindSaveCharacterTables(current.address, tonumber(current.value) or 0)
+        if tables then
+          state.saveCharacterTables = tables
+          return tables
+        end
+        cachedValue = -1
+      end
+    else
+      cachedValue = -1
+    end
+  end
+  return nil, "キャラ保存状態の配列を安全に検証できません。アプリとdataのバージョンを確認してください。"
+end
+
 local function chooseFromList(characters)
   local bucketStarts = {}
   local buckets = {}
@@ -437,12 +650,12 @@ end
 
 local function kenkouFormatFieldLabel(field)
   if field.fieldType == "checkbox" then
-    return field.name .. KENKOU_DIVIDER
+    return field.name
   end
   if field.multiplier ~= 1 then
-    return string.format("%s（CSV値・内部×%d）%s", field.name, field.multiplier, KENKOU_DIVIDER)
+    return string.format("%s（CSV値・内部×%d）", field.name, field.multiplier)
   end
-  return field.name .. "（CSV値）" .. KENKOU_DIVIDER
+  return field.name .. "（CSV値）"
 end
 
 local function kenkouReadFormValues(character, formIndex, row)
@@ -563,6 +776,178 @@ local function kenkouSaveToList(character, formIndex, row)
   gg.toast(string.format("保存リストへ%d項目を追加しました", #listItems))
 end
 
+local function kenkouGetSaveAddresses(character)
+  local tables, errorMessage = kenkouResolveSaveCharacterTables()
+  if not tables then
+    return nil, errorMessage
+  end
+  local saveId = character.id + 1
+  if saveId < 1 or saveId > tables.unitCount then
+    return nil, string.format("%sの保存IDが配列範囲外です。", character.name)
+  end
+  return {
+    saveId = saveId,
+    ownership = tables.ownershipStart + (saveId - 1) * 4,
+    level = tables.levelStart + (saveId - 1) * 8,
+    levelMarker = tables.levelStart + (saveId - 1) * 8 + 4,
+    form = tables.formStart + (saveId - 1) * 4,
+    catOwnership = tables.ownershipStart
+  }
+end
+
+local function kenkouUnlockCharacter(character)
+  local addresses, errorMessage = kenkouGetSaveAddresses(character)
+  if not addresses then
+    gg.alert(errorMessage)
+    return
+  end
+  local values = gg.getValues({
+    { address = addresses.catOwnership, flags = gg.TYPE_DWORD },
+    { address = addresses.ownership, flags = gg.TYPE_DWORD }
+  })
+  if not values[1] or values[1].value == nil or not values[2] then
+    gg.alert("キャラ解放値を読み取れません。")
+    return
+  end
+  gg.setValues({
+    {
+      address = addresses.ownership,
+      flags = gg.TYPE_DWORD,
+      value = values[1].value
+    }
+  })
+  gg.toast(character.name .. "を解放しました")
+end
+
+local function kenkouDecodeLevel(levelValue, markerValue)
+  local adjustment
+  if markerValue == 131072 then
+    adjustment = 512
+  elseif markerValue == 65536 then
+    adjustment = 256
+  else
+    return nil, nil
+  end
+  local encoded = levelValue - adjustment
+  if encoded < 0 then
+    return nil, nil
+  end
+  return math.floor(encoded / 65536) + 1, encoded % 65536
+end
+
+local function kenkouRemoveLevelListItems(addresses)
+  if type(gg.getListItems) ~= "function" or type(gg.removeListItems) ~= "function" then
+    return
+  end
+  local targets = {
+    [addresses.level] = true,
+    [addresses.levelMarker] = true
+  }
+  local removals = {}
+  for _, item in ipairs(gg.getListItems() or {}) do
+    if targets[item.address] then
+      removals[#removals + 1] = item
+    end
+  end
+  if #removals > 0 then
+    gg.removeListItems(removals)
+  end
+end
+
+local function kenkouChangeLevel(character)
+  local addresses, errorMessage = kenkouGetSaveAddresses(character)
+  if not addresses then
+    gg.alert(errorMessage)
+    return
+  end
+  local currentValues = gg.getValues({
+    { address = addresses.level, flags = gg.TYPE_DWORD },
+    { address = addresses.levelMarker, flags = gg.TYPE_DWORD }
+  })
+  if not currentValues[1] or not currentValues[2] then
+    gg.alert("現在のレベル値を読み取れません。")
+    return
+  end
+  local currentLevel, currentPlus = kenkouDecodeLevel(
+    tonumber(currentValues[1].value) or 0,
+    tonumber(currentValues[2].value) or 0
+  )
+  currentLevel = currentLevel or 1
+  currentPlus = currentPlus or 0
+
+  local input = gg.prompt(
+    { "レベル", "プラス値", "凍結" },
+    { tostring(currentLevel), tostring(currentPlus), true },
+    { "number", "number", "checkbox" }
+  )
+  if not input then
+    kenkouSuspendUntilVisible()
+    return
+  end
+  local level = tonumber(input[1])
+  local plus = tonumber(input[2])
+  if not level or level % 1 ~= 0 or level < 1 then
+    gg.alert("レベルは1以上の整数で入力してください。")
+    return
+  end
+  if not plus or plus % 1 ~= 0 or plus < 0 or plus > 65535 then
+    gg.alert("プラス値は0〜65535の整数で入力してください。")
+    return
+  end
+
+  local encoded = (level - 1) * 65536 + plus
+  if encoded > 2147483647 then
+    gg.alert("指定値がDWORDの範囲を超えています。")
+    return
+  end
+  local oddByte = math.floor(encoded / 256) % 2 == 1
+  local writes = {
+    {
+      address = addresses.level,
+      flags = gg.TYPE_DWORD,
+      value = encoded + (oddByte and 512 or 256),
+      name = string.format("%03d %s | レベル", character.id, character.name)
+    },
+    {
+      address = addresses.levelMarker,
+      flags = gg.TYPE_DWORD,
+      value = oddByte and 131072 or 65536,
+      name = string.format("%03d %s | レベル識別値", character.id, character.name)
+    }
+  }
+
+  -- kenkou: 以前の凍結を解除してから値を書き、選択された場合だけ再登録する。
+  kenkouRemoveLevelListItems(addresses)
+  gg.setValues(writes)
+  if input[3] == true then
+    for _, write in ipairs(writes) do
+      write.freeze = true
+      write.freezeType = gg.FREEZE_NORMAL
+    end
+    gg.addListItems(writes)
+  end
+  gg.toast(string.format("%sをレベル%d＋%dに変更しました%s",
+    character.name, level, plus, input[3] == true and "（凍結中）" or ""))
+end
+
+local function kenkouOpenSaveEditor(character)
+  while true do
+    local action = kenkouChooseMenu(
+      { "キャラ解放", "レベル変更", "戻る" },
+      character.name .. " / キャラ解放・レベル変更",
+      false,
+      "kenkou-save-action-" .. character.id
+    )
+    if action == 1 then
+      kenkouUnlockCharacter(character)
+    elseif action == 2 then
+      kenkouChangeLevel(character)
+    else
+      return
+    end
+  end
+end
+
 local function kenkouOpenCharacter(character)
   local rows, errorMessage = loadUnitRows(character)
   if not rows then
@@ -583,15 +968,19 @@ local function kenkouOpenCharacter(character)
 
     local fieldTitle = string.format("%s / 第%d %s", character.name, formIndex + 1, character.forms[formIndex].label)
     while true do
-      local action = kenkouChooseMenu({ "ステータス変更", "レベル変更（実装予定）", "リストに保存" },
-        fieldTitle, true, "kenkou-action-" .. character.id .. "-" .. formIndex)
-      if action == nil then
+      local action = kenkouChooseMenu(
+        { "キャラ解放/レベル変更", "ステータス変更", "リストに保存", "戻る" },
+        fieldTitle,
+        false,
+        "kenkou-action-" .. character.id .. "-" .. formIndex
+      )
+      if action == nil or action == 4 then
         break
       end
       if action == 1 then
-        kenkouOpenStatusEditor(character, formIndex, row)
+        kenkouOpenSaveEditor(character)
       elseif action == 2 then
-        gg.alert("レベル変更は実装予定です。")
+        kenkouOpenStatusEditor(character, formIndex, row)
       elseif action == 3 then
         kenkouSaveToList(character, formIndex, row)
       end
