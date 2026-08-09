@@ -9,6 +9,7 @@ local ANCHOR_COLUMN = 6
 local ANCHOR_OFFSET = ANCHOR_COLUMN * 4
 local ANCHOR_PREFIX_COLUMNS = 12
 local MAX_ANCHOR_CANDIDATES = 256
+local KENKOU_DIVIDER = " ─────────"
 
 local state = {
   rootDirectory = nil,
@@ -18,6 +19,10 @@ local state = {
   characters = {},
   unitTableAddress = nil,
   anchorRows = nil
+}
+
+local kenkouUi = {
+  choicePositions = {}
 }
 
 local function dirname(path)
@@ -84,8 +89,8 @@ local function splitCsv(line)
   return values
 end
 
-local function suspendUntilVisible()
-  -- 画面外を押したときは終了せず、GGアイコンが再度押されるまで待機する。
+local function kenkouSuspendUntilVisible()
+  -- kenkou: 画面外を押したときは終了せず、GGアイコンが再度押されるまで待機する。
   gg.setVisible(false)
   while not gg.isVisible() do
     gg.sleep(150)
@@ -93,24 +98,33 @@ local function suspendUntilVisible()
   gg.setVisible(false)
 end
 
-local function chooseMenu(items, title, includeBack)
+local function kenkouChooseMenu(items, title, includeBack, positionKey)
   local choices = {}
+  local offset = 0
+  if includeBack then
+    choices[#choices + 1] = "戻る"
+    offset = 1
+  end
   for index, item in ipairs(items) do
-    choices[index] = item
+    choices[#choices + 1] = item
   end
   if includeBack then
     choices[#choices + 1] = "戻る"
   end
 
+  local key = positionKey or title
   while true do
-    local selected = gg.choice(choices, nil, title)
+    local selectedPosition = kenkouUi.choicePositions[key] or (offset + 1)
+    selectedPosition = math.max(1, math.min(selectedPosition, #choices))
+    local selected = gg.choice(choices, selectedPosition, title)
     if selected then
-      if includeBack and selected == #choices then
+      if includeBack and (selected == 1 or selected == #choices) then
         return nil
       end
-      return selected
+      kenkouUi.choicePositions[key] = selected
+      return selected - offset
     end
-    suspendUntilVisible()
+    kenkouSuspendUntilVisible()
   end
 end
 
@@ -348,11 +362,6 @@ local function getAnchorRows()
   return rows
 end
 
-local function getAddressValue(address)
-  local values = gg.getValues({ { address = address, flags = gg.TYPE_DWORD } })
-  return values[1] and tonumber(values[1].value) or nil
-end
-
 local function verifyAnchorCandidate(recordAddress, anchorRows)
   -- 複数形態をまとめて読み、同じ先頭値を持つ別レコードを除外する。
   local requests = {}
@@ -430,7 +439,7 @@ local function chooseFromList(characters)
     bucketLabels[index] = string.format("%d〜%d", bucketStart, bucketStart + 99)
   end
   while true do
-    local selectedBucket = chooseMenu(bucketLabels, "ユニット番号の範囲を選択", true)
+    local selectedBucket = kenkouChooseMenu(bucketLabels, "ユニット番号の範囲を選択", true, "kenkou-bucket")
     if not selectedBucket then
       return nil
     end
@@ -440,7 +449,8 @@ local function chooseFromList(characters)
     for index, character in ipairs(candidates) do
       labels[index] = string.format("%03d  %s", character.id, character.name)
     end
-    local selectedCharacter = chooseMenu(labels, "キャラを選択", true)
+    local selectedCharacter = kenkouChooseMenu(labels, "キャラを選択", true,
+      "kenkou-character-" .. bucketStarts[selectedBucket])
     if selectedCharacter then
       return candidates[selectedCharacter]
     end
@@ -450,7 +460,7 @@ end
 local function chooseByName(characters)
   local prompt = gg.prompt({ "キャラ名を入力" }, { "" }, { "text" })
   if not prompt then
-    suspendUntilVisible()
+    kenkouSuspendUntilVisible()
     return nil
   end
   local query = trim(prompt[1] or "")
@@ -474,7 +484,7 @@ local function chooseByName(characters)
   for index, character in ipairs(candidates) do
     labels[index] = string.format("%03d  %s", character.id, character.name)
   end
-  local selectedCharacter = chooseMenu(labels, "検索結果", true)
+  local selectedCharacter = kenkouChooseMenu(labels, "検索結果", true, "kenkou-search-results")
   return selectedCharacter and candidates[selectedCharacter] or nil
 end
 
@@ -486,73 +496,142 @@ local function chooseForm(character)
   table.sort(indices)
   local labels = {}
   for index, formIndex in ipairs(indices) do
-    labels[index] = character.forms[formIndex].label
+    labels[index] = string.format("第%d　%s", formIndex + 1, character.forms[formIndex].label)
   end
-  local selectedForm = chooseMenu(labels, character.name .. " の形態を選択", true)
+  local selectedForm = kenkouChooseMenu(labels, character.name .. " の形態を選択", true,
+    "kenkou-form-" .. character.id)
   return selectedForm and indices[selectedForm] or nil
 end
 
-local function chooseField(title)
-  local labels = {}
-  for _, field in ipairs(state.fields) do
-    labels[#labels + 1] = field.name
+local function kenkouFormatFieldLabel(field)
+  if field.fieldType == "checkbox" then
+    return field.name .. KENKOU_DIVIDER
   end
-  local selectedField = chooseMenu(labels, title, true)
-  return selectedField and (selectedField - 1) or nil
+  if field.multiplier ~= 1 then
+    return string.format("%s（CSV値・内部×%d）%s", field.name, field.multiplier, KENKOU_DIVIDER)
+  end
+  return field.name .. "（CSV値）" .. KENKOU_DIVIDER
 end
 
-local function editField(character, formIndex, row, column)
+local function kenkouReadFormValues(character, formIndex, row)
   local unitTableAddress, addressError = findUnitTableAddress()
   if not unitTableAddress then
-    gg.alert(addressError)
-    return
+    return nil, addressError
   end
-  local address = unitTableAddress + character.id * UNIT_SIZE + formIndex * RECORD_SIZE + column * 4
-  local currentValue = getAddressValue(address)
-  local field = state.fields[column + 1]
-  local multiplier = field.multiplier
-  local displayValue = currentValue and currentValue / multiplier or row[column + 1] / multiplier
-
-  if field.fieldType == "checkbox" then
-    local prompt = gg.prompt(
-      { field.name },
-      { displayValue ~= 0 },
-      { "checkbox" }
-    )
-    if not prompt then
-      suspendUntilVisible()
-      return
+  local requests = {}
+  for column = 0, RECORD_COLUMN_COUNT - 1 do
+    requests[#requests + 1] = {
+      address = unitTableAddress + character.id * UNIT_SIZE + formIndex * RECORD_SIZE + column * 4,
+      flags = gg.TYPE_DWORD
+    }
+  end
+  local values = gg.getValues(requests)
+  for index, request in ipairs(requests) do
+    if not values[index] then
+      values[index] = {
+        address = request.address,
+        flags = request.flags,
+        value = row[index] or 0
+      }
+    elseif values[index].value == nil then
+      values[index].value = row[index] or 0
     end
-    local inputValue = prompt[1] == true and 1 or 0
-    gg.setValues({ { address = address, flags = gg.TYPE_DWORD, value = inputValue } })
-    gg.toast(string.format("%s: %s", field.name, inputValue == 1 and "有効" or "無効"))
-    return
   end
-
-  local promptLabel = field.name .. "（CSV値）"
-  if multiplier ~= 1 then
-    promptLabel = string.format("%s（CSV値・内部×%d）", field.name, multiplier)
-  end
-  local prompt = gg.prompt(
-    { promptLabel },
-    { tostring(displayValue) },
-    { "number" }
-  )
-  if not prompt then
-    suspendUntilVisible()
-    return
-  end
-  local inputValue = tonumber(prompt[1])
-  if not inputValue or inputValue % 1 ~= 0 then
-    gg.alert("整数を入力してください。")
-    return
-  end
-  local memoryValue = inputValue * multiplier
-  gg.setValues({ { address = address, flags = gg.TYPE_DWORD, value = memoryValue } })
-  gg.toast(string.format("%s: %d", field.name, inputValue))
+  return values
 end
 
-local function openCharacter(character)
+local function kenkouOpenStatusEditor(character, formIndex, row)
+  local currentValues, errorMessage = kenkouReadFormValues(character, formIndex, row)
+  if not currentValues then
+    gg.alert(errorMessage)
+    return
+  end
+
+  local prompts = { "戻る（変更せず戻る）" }
+  local defaults = { false }
+  local types = { "checkbox" }
+  for index, field in ipairs(state.fields) do
+    local memoryValue = tonumber(currentValues[index] and currentValues[index].value) or row[index] or 0
+    local csvValue = memoryValue / field.multiplier
+    prompts[#prompts + 1] = kenkouFormatFieldLabel(field)
+    if field.fieldType == "checkbox" then
+      defaults[#defaults + 1] = csvValue ~= 0
+    else
+      defaults[#defaults + 1] = tostring(csvValue)
+    end
+    types[#types + 1] = field.fieldType == "checkbox" and "checkbox" or "number"
+  end
+  prompts[#prompts + 1] = "戻る（変更せず戻る）"
+  defaults[#defaults + 1] = false
+  types[#types + 1] = "checkbox"
+
+  -- kenkou: 117項目を一度に表示し、入力中はスクロール位置を維持する。
+  local prompt = gg.prompt(
+    prompts,
+    defaults,
+    types
+  )
+  if not prompt then
+    kenkouSuspendUntilVisible()
+    return
+  end
+  if prompt[1] == true or prompt[#prompt] == true then
+    return
+  end
+
+  local writes = {}
+  for index, field in ipairs(state.fields) do
+    local inputValue
+    if field.fieldType == "checkbox" then
+      inputValue = prompt[index + 1] == true and 1 or 0
+    else
+      inputValue = tonumber(prompt[index + 1])
+      if not inputValue or inputValue % 1 ~= 0 then
+        gg.alert(field.name .. " は整数で入力してください。")
+        return
+      end
+    end
+    local memoryValue = inputValue * field.multiplier
+    local currentValue = tonumber(currentValues[index] and currentValues[index].value) or row[index] or 0
+    if memoryValue ~= currentValue then
+      writes[#writes + 1] = {
+        address = currentValues[index].address,
+        flags = gg.TYPE_DWORD,
+        value = memoryValue
+      }
+    end
+  end
+
+  if #writes == 0 then
+    gg.toast("変更はありません")
+    return
+  end
+  gg.setValues(writes)
+  gg.toast(string.format("%d項目を変更しました", #writes))
+end
+
+local function kenkouSaveToList(character, formIndex, row)
+  local currentValues, errorMessage = kenkouReadFormValues(character, formIndex, row)
+  if not currentValues then
+    gg.alert(errorMessage)
+    return
+  end
+
+  local listItems = {}
+  local formLabel = character.forms[formIndex].label
+  for index, field in ipairs(state.fields) do
+    listItems[#listItems + 1] = {
+      address = currentValues[index].address,
+      flags = gg.TYPE_DWORD,
+      value = currentValues[index].value,
+      name = string.format("%03d 第%d %s | %s", character.id, formIndex + 1, formLabel, field.name)
+    }
+  end
+  gg.addListItems(listItems)
+  gg.toast(string.format("保存リストへ%d項目を追加しました", #listItems))
+end
+
+local function kenkouOpenCharacter(character)
   local rows, errorMessage = loadUnitRows(character)
   if not rows then
     gg.alert(errorMessage or "ステータスCSVを読めません。")
@@ -570,13 +649,20 @@ local function openCharacter(character)
       return
     end
 
-    local fieldTitle = string.format("%s / %s", character.name, character.forms[formIndex].label)
+    local fieldTitle = string.format("%s / 第%d %s", character.name, formIndex + 1, character.forms[formIndex].label)
     while true do
-      local column = chooseField(fieldTitle)
-      if column == nil then
+      local action = kenkouChooseMenu({ "ステータス変更", "レベル変更（実装予定）", "リストに保存" },
+        fieldTitle, true, "kenkou-action-" .. character.id .. "-" .. formIndex)
+      if action == nil then
         break
       end
-      editField(character, formIndex, row, column)
+      if action == 1 then
+        kenkouOpenStatusEditor(character, formIndex, row)
+      elseif action == 2 then
+        gg.alert("レベル変更は実装予定です。")
+      elseif action == 3 then
+        kenkouSaveToList(character, formIndex, row)
+      end
     end
   end
 end
@@ -599,15 +685,16 @@ local function main()
   end
 
   while true do
-    local action = chooseMenu({ "一覧から選ぶ", "キャラ名で検索", "非表示", "終了" }, "KBC ステータス変更", false)
+    local action = kenkouChooseMenu({ "一覧から選ぶ", "キャラ名で検索", "非表示", "終了" },
+      "KBC ステータス変更", false, "kenkou-main")
     if action == 1 then
       local character = chooseFromList(state.names)
-      if character then openCharacter(character) end
+      if character then kenkouOpenCharacter(character) end
     elseif action == 2 then
       local character = chooseByName(state.names)
-      if character then openCharacter(character) end
+      if character then kenkouOpenCharacter(character) end
     elseif action == 3 then
-      suspendUntilVisible()
+      kenkouSuspendUntilVisible()
     else
       return
     end
