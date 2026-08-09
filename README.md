@@ -7,8 +7,10 @@ GameGuardian 用のステータス変更スクリプトの実験環境です。`
 1. リポジトリをフォルダごと取得し、同梱の `data` と `lua` を含むフォルダを端末の Download などへコピーする。`lua` ファイル単体では動かない。
 2. GameGuardian でにゃんこ大戦争を対象にしてから、`lua/kbc-status-test.lua` を実行する。
 
-Lua は `data/names/Unit_ExplanationNNN_ja.csv` と変換済み `data/units/unitNNN.csv` を直接読む。値の入力は元のCSV値で行い、ネイティブコードで確認した倍率を適用して DWORD に書き込む。
+Lua は `data/names/Unit_ExplanationNNN_ja.csv`、変換済み `data/units/unitNNN.csv`、最新解析に基づく `data/status-fields.csv` を直接読む。値の入力は元のCSV値で行い、ネイティブコードで確認した倍率を適用して DWORD に書き込む。倍率がある項目は入力欄に `内部×2` などを表示し、能力の有効・無効だけを持つ項目はチェックボックスで変更できる。
 
 `data` はv15.5.1の復号済みデータから生成済みで、スクリプトの実行に必要な最小限の変換済み値と名前だけを含む。名前だけ更新するときは `data/names` のExplanationファイルを差し替えればよい。ステータスも更新するときは、同じバージョンの `DataLocal` と `resLocal` を使って `tools/build-data.ps1` を実行する。
 
 Android用にまとめた `dist` だけは `.gitignore` で除外している。
+
+画面には列番号を出さず、117項目の解析済み名称を直接表示する。各画面の「戻る」で一つ前へ戻り、画面外を押した場合はLuaを終了せず一時非表示になる。GGアイコンを押すと同じメニューを再表示し、「終了」を選んだ場合だけスクリプトを終了する。

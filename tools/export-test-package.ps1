@@ -11,6 +11,9 @@ $scriptPath = Join-Path $repositoryRoot "lua\kbc-status-test.lua"
 if (-not (Test-Path -LiteralPath (Join-Path $dataDirectory "names\Unit_Explanation1_ja.csv"))) {
     throw "先に tools/build-data.ps1 を実行してください。"
 }
+if (-not (Test-Path -LiteralPath (Join-Path $dataDirectory "status-fields.csv"))) {
+    throw "data/status-fields.csv が見つかりません。"
+}
 
 New-Item -ItemType Directory -Path $DestinationDirectory -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $DestinationDirectory "lua") -Force | Out-Null
@@ -25,6 +28,7 @@ if ([System.IO.File]::Exists($legacyNameIndex)) {
 }
 
 Copy-Item -LiteralPath $scriptPath -Destination (Join-Path $DestinationDirectory "lua\kbc-status-test.lua") -Force
+Copy-Item -LiteralPath (Join-Path $dataDirectory "status-fields.csv") -Destination (Join-Path $destinationDataDirectory "status-fields.csv") -Force
 Get-ChildItem -LiteralPath (Join-Path $dataDirectory "units") -File -Filter "unit*.csv" |
     Copy-Item -Destination $destinationUnitsDirectory -Force
 Get-ChildItem -LiteralPath (Join-Path $dataDirectory "names") -File -Filter "Unit_Explanation*_ja.csv" |

@@ -10,20 +10,10 @@ local ANCHOR_OFFSET = ANCHOR_COLUMN * 4
 local ANCHOR_PREFIX_COLUMNS = 12
 local MAX_ANCHOR_CANDIDATES = 256
 
-local FIELD_LABELS = {
-  [0] = "体力", [1] = "KB", [2] = "速度", [3] = "攻撃頻度",
-  [4] = "射程", [5] = "攻撃力", [6] = "生産コスト", [7] = "再生産",
-  [8] = "攻撃対象", [9] = "攻撃範囲/幅"
-}
-
-local CSV_MULTIPLIERS = {
-  [2] = 2, [4] = 2, [5] = 4, [6] = 100,
-  [7] = 2, [9] = 4, [44] = 4, [45] = 4
-}
-
 local state = {
   rootDirectory = nil,
   dataDirectory = nil,
+  fields = {},
   names = {},
   characters = {},
   unitTableAddress = nil,
@@ -60,6 +50,7 @@ end
 local function hasDataFiles(directory)
   return fileExists(directory .. "/units/unit000.csv")
     and fileExists(directory .. "/names/Unit_Explanation1_ja.csv")
+    and fileExists(directory .. "/status-fields.csv")
 end
 
 local function removeTrailingSlash(path)
@@ -72,6 +63,36 @@ local function splitCsv(line)
     values[#values + 1] = trim(value)
   end
   return values
+end
+
+local function suspendUntilVisible()
+  -- 画面外を押したときは終了せず、GGアイコンが再度押されるまで待機する。
+  gg.setVisible(false)
+  while not gg.isVisible() do
+    gg.sleep(150)
+  end
+  gg.setVisible(false)
+end
+
+local function chooseMenu(items, title, includeBack)
+  local choices = {}
+  for index, item in ipairs(items) do
+    choices[index] = item
+  end
+  if includeBack then
+    choices[#choices + 1] = "戻る"
+  end
+
+  while true do
+    local selected = gg.choice(choices, nil, title)
+    if selected then
+      if includeBack and selected == #choices then
+        return nil
+      end
+      return selected
+    end
+    suspendUntilVisible()
+  end
 end
 
 local function initializePaths()
@@ -105,7 +126,7 @@ local function initializePaths()
   end
 
   local selection = gg.prompt(
-    { "units と names がある data フォルダのフルパス" },
+    { "units・names・status-fields.csv がある data フォルダのフルパス" },
     { "/storage/emulated/0/Download/KBC-rakv0-status-script/data" },
     { "text" }
   )
@@ -117,6 +138,44 @@ local function initializePaths()
     return nil, "ユニットデータを取得できません。data フォルダ全体をコピーして指定してください。"
   end
   state.dataDirectory = directory
+  return true
+end
+
+local function loadFields()
+  local content, errorMessage = readFile(state.dataDirectory .. "/status-fields.csv")
+  if not content then
+    return nil, "ステータス定義を読めません: " .. tostring(errorMessage)
+  end
+
+  local fields = {}
+  local lineNumber = 0
+  for line in content:gmatch("[^\r\n]+") do
+    lineNumber = lineNumber + 1
+    if lineNumber > 1 then
+      local columns = splitCsv(line)
+      local index = tonumber(columns[1])
+      local name = trim(columns[2] or "")
+      local fieldType = trim(columns[3] or "number")
+      local multiplier = tonumber(columns[4]) or 1
+      if index ~= #fields or name == "" then
+        return nil, string.format("status-fields.csv の%d行目が不正です。", lineNumber)
+      end
+      if fieldType ~= "number" and fieldType ~= "checkbox" then
+        return nil, string.format("%s の入力形式が不正です。", name)
+      end
+      fields[#fields + 1] = {
+        index = index,
+        name = name,
+        fieldType = fieldType,
+        multiplier = multiplier
+      }
+    end
+  end
+
+  if #fields ~= RECORD_COLUMN_COUNT then
+    return nil, string.format("ステータス定義は%d件必要です（現在%d件）。", RECORD_COLUMN_COUNT, #fields)
+  end
+  state.fields = fields
   return true
 end
 
@@ -298,23 +357,28 @@ local function chooseFromList(characters)
   for index, bucketStart in ipairs(bucketStarts) do
     bucketLabels[index] = string.format("%d〜%d", bucketStart, bucketStart + 99)
   end
-  local selectedBucket = gg.choice(bucketLabels, nil, "ユニット番号の範囲を選択")
-  if not selectedBucket then
-    return nil
-  end
+  while true do
+    local selectedBucket = chooseMenu(bucketLabels, "ユニット番号の範囲を選択", true)
+    if not selectedBucket then
+      return nil
+    end
 
-  local candidates = buckets[bucketStarts[selectedBucket]]
-  local labels = {}
-  for index, character in ipairs(candidates) do
-    labels[index] = string.format("%03d  %s", character.id, character.name)
+    local candidates = buckets[bucketStarts[selectedBucket]]
+    local labels = {}
+    for index, character in ipairs(candidates) do
+      labels[index] = string.format("%03d  %s", character.id, character.name)
+    end
+    local selectedCharacter = chooseMenu(labels, "キャラを選択", true)
+    if selectedCharacter then
+      return candidates[selectedCharacter]
+    end
   end
-  local selectedCharacter = gg.choice(labels, nil, "キャラを選択")
-  return selectedCharacter and candidates[selectedCharacter] or nil
 end
 
 local function chooseByName(characters)
   local prompt = gg.prompt({ "キャラ名を入力" }, { "" }, { "text" })
   if not prompt then
+    suspendUntilVisible()
     return nil
   end
   local query = trim(prompt[1] or "")
@@ -338,7 +402,7 @@ local function chooseByName(characters)
   for index, character in ipairs(candidates) do
     labels[index] = string.format("%03d  %s", character.id, character.name)
   end
-  local selectedCharacter = gg.choice(labels, nil, "検索結果")
+  local selectedCharacter = chooseMenu(labels, "検索結果", true)
   return selectedCharacter and candidates[selectedCharacter] or nil
 end
 
@@ -352,47 +416,53 @@ local function chooseForm(character)
   for index, formIndex in ipairs(indices) do
     labels[index] = character.forms[formIndex].label
   end
-  local selectedForm = gg.choice(labels, nil, character.name .. " の形態を選択")
+  local selectedForm = chooseMenu(labels, character.name .. " の形態を選択", true)
   return selectedForm and indices[selectedForm] or nil
 end
 
-local function getFieldLabel(column)
-  return FIELD_LABELS[column] or string.format("CSV列 %03d", column)
-end
-
-local function chooseField()
-  local pageLabels = {}
-  for startColumn = 0, RECORD_COLUMN_COUNT - 1, 20 do
-    pageLabels[#pageLabels + 1] = string.format("列 %03d〜%03d", startColumn, math.min(startColumn + 19, RECORD_COLUMN_COUNT - 1))
-  end
-  local selectedPage = gg.choice(pageLabels, nil, "変更する項目の範囲を選択")
-  if not selectedPage then
-    return nil
-  end
-  local startColumn = (selectedPage - 1) * 20
+local function chooseField(title)
   local labels = {}
-  for column = startColumn, math.min(startColumn + 19, RECORD_COLUMN_COUNT - 1) do
-    labels[#labels + 1] = string.format("%03d  %s", column, getFieldLabel(column))
+  for _, field in ipairs(state.fields) do
+    labels[#labels + 1] = field.name
   end
-  local selectedField = gg.choice(labels, nil, "変更する項目を選択")
-  return selectedField and (startColumn + selectedField - 1) or nil
+  local selectedField = chooseMenu(labels, title, true)
+  return selectedField and (selectedField - 1) or nil
 end
 
-local function editField(character, formIndex, row, unitTableAddress)
-  local column = chooseField()
-  if column == nil then
-    return
-  end
+local function editField(character, formIndex, row, unitTableAddress, column)
   local address = unitTableAddress + character.id * UNIT_SIZE + formIndex * RECORD_SIZE + column * 4
   local currentValue = getAddressValue(address)
-  local multiplier = CSV_MULTIPLIERS[column] or 1
+  local field = state.fields[column + 1]
+  local multiplier = field.multiplier
   local displayValue = currentValue and currentValue / multiplier or row[column + 1] / multiplier
+
+  if field.fieldType == "checkbox" then
+    local prompt = gg.prompt(
+      { field.name },
+      { displayValue ~= 0 },
+      { "checkbox" }
+    )
+    if not prompt then
+      suspendUntilVisible()
+      return
+    end
+    local inputValue = prompt[1] == true and 1 or 0
+    gg.setValues({ { address = address, flags = gg.TYPE_DWORD, value = inputValue } })
+    gg.toast(string.format("%s: %s", field.name, inputValue == 1 and "有効" or "無効"))
+    return
+  end
+
+  local promptLabel = field.name .. "（CSV値）"
+  if multiplier ~= 1 then
+    promptLabel = string.format("%s（CSV値・内部×%d）", field.name, multiplier)
+  end
   local prompt = gg.prompt(
-    { string.format("%s（CSV値）", getFieldLabel(column)) },
+    { promptLabel },
     { tostring(displayValue) },
     { "number" }
   )
   if not prompt then
+    suspendUntilVisible()
     return
   end
   local inputValue = tonumber(prompt[1])
@@ -402,18 +472,13 @@ local function editField(character, formIndex, row, unitTableAddress)
   end
   local memoryValue = inputValue * multiplier
   gg.setValues({ { address = address, flags = gg.TYPE_DWORD, value = memoryValue } })
-  gg.toast(string.format("%s: %d", getFieldLabel(column), inputValue))
+  gg.toast(string.format("%s: %d", field.name, inputValue))
 end
 
 local function openCharacter(character)
-  local formIndex = chooseForm(character)
-  if formIndex == nil then
-    return
-  end
   local rows, errorMessage = loadUnitRows(character)
-  local row = rows and rows[formIndex + 1]
-  if not row then
-    gg.alert(errorMessage or "選択形態のCSVデータがありません。")
+  if not rows then
+    gg.alert(errorMessage or "ステータスCSVを読めません。")
     return
   end
   local unitTableAddress, addressError = findUnitTableAddress()
@@ -423,15 +488,23 @@ local function openCharacter(character)
   end
 
   while true do
-    local action = gg.choice({ "ステータスを変更", "CSVの先頭値を確認", "戻る" }, nil,
-      string.format("%03d %s / %s", character.id, character.name, character.forms[formIndex].label))
-    if action == 1 then
-      editField(character, formIndex, row, unitTableAddress)
-    elseif action == 2 then
-      gg.alert(string.format("体力: %d\n速度: %d\n攻撃力: %d\nコスト: %d",
-        row[1], row[3], row[6], row[7]))
-    else
+    local formIndex = chooseForm(character)
+    if formIndex == nil then
       return
+    end
+    local row = rows[formIndex + 1]
+    if not row then
+      gg.alert("選択形態のCSVデータがありません。")
+      return
+    end
+
+    local fieldTitle = string.format("%s / %s", character.name, character.forms[formIndex].label)
+    while true do
+      local column = chooseField(fieldTitle)
+      if column == nil then
+        break
+      end
+      editField(character, formIndex, row, unitTableAddress, column)
     end
   end
 end
@@ -447,15 +520,22 @@ local function main()
     gg.alert(errorMessage)
     return
   end
+  success, errorMessage = loadFields()
+  if not success then
+    gg.alert(errorMessage)
+    return
+  end
 
   while true do
-    local action = gg.choice({ "一覧から選ぶ", "キャラ名で検索", "終了" }, nil, "KBC ステータス変更")
+    local action = chooseMenu({ "一覧から選ぶ", "キャラ名で検索", "非表示", "終了" }, "KBC ステータス変更", false)
     if action == 1 then
       local character = chooseFromList(state.names)
       if character then openCharacter(character) end
     elseif action == 2 then
       local character = chooseByName(state.names)
       if character then openCharacter(character) end
+    elseif action == 3 then
+      suspendUntilVisible()
     else
       return
     end
