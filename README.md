@@ -4,11 +4,11 @@ GameGuardian 用のステータス変更スクリプトの実験環境です。`
 
 ## 使用手順
 
-1. `tools/build-data.ps1` を実行して、復号済み `DataLocal` から実行用CSVを生成する。
-2. `tools/export-test-package.ps1` を実行する。
-3. `dist/KBC-rakv0-status-script` を端末の Download などへコピーする。
-4. GameGuardian でにゃんこ大戦争を対象にしてから、`lua/kbc-status-test.lua` を実行する。
+1. 同梱の `data` と `lua` を含むフォルダを端末の Download などへコピーする。
+2. GameGuardian でにゃんこ大戦争を対象にしてから、`lua/kbc-status-test.lua` を実行する。
 
 Lua は `unit-names.csv` と変換済み `data/units/unitNNN.csv` を読む。値の入力は元のCSV値で行い、ネイティブコードで確認した倍率を適用して DWORD に書き込む。
 
-ゲーム由来の復号済みデータとAndroid用配布物は `.gitignore` で除外している。GitHubへは変換器、Lua、設計資料だけを置く。
+`data` はv15.5.1の復号済みデータから生成済みで、スクリプトの実行に必要な最小限の変換済み値と名前だけを含む。ゲームを更新したときは、同じバージョンの `DataLocal` と `resLocal` を使って `tools/build-data.ps1` を実行し、データも更新する。
+
+Android用にまとめた `dist` だけは `.gitignore` で除外している。
