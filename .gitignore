@@ -1,3 +1,4 @@
-# Android 配布用にローカル生成するパッケージ
 dist/
-data/names/
+status-saves-index.csv
+*.kbcstatus
+tmp-*
