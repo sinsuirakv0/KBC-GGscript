@@ -1,4 +1,5 @@
 dist/
 status-saves-index.csv
+status-saves/
 *.kbcstatus
 tmp-*
