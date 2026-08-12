@@ -1,11 +1,11 @@
-﻿# KBC-rakv0-status-script
+﻿# KBC-GGscript
 
 ## 使い方
 
 1. このリポジトリをフォルダごと端末へダウンロードします。
-2. `data` と `lua` を含むフォルダを、端末の Download などへそのままコピーします。`kbc-status-test.lua` だけを移動すると動作しません。
+2. `data` と `lua` を含むフォルダを、端末の Download などへそのままコピーします。`KBC-GGscript.lua` だけを移動すると動作しません。
 3. にゃんこ大戦争を起動し、GameGuardianで対象アプリとして選択します。
-4. GameGuardianから `lua/kbc-status-test.lua` を実行します。
+4. GameGuardianから `lua/KBC-GGscript.lua` を実行します。
 5. ホームから使いたい機能を選びます。
 
 - キャラ解放/Lv変更/形態変更
