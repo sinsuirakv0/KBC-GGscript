@@ -62,7 +62,7 @@
 └─ KBC-GGscript/
    ├─ data/
    │  ├─ status-fields.csv
-   │  ├─ unit-index.csv
+   │  ├─ character-index.json
    │  └─ units/
    ├─ lua/
    │  └─ KBC-GGscript.lua
@@ -187,7 +187,7 @@ Vectorはroot端末向けのXposed互換フレームワーク、Hide My Applist�
 ### キャラ解放/Lv変更/形態変更
 
 - `一覧から選ぶ` はIDを100件ごとに分けて表示します。
-- `キャラ名/IDで検索` は第1～第4形態の名前でも検索できます。
+- `キャラ名/IDで検索` は第1～第4形態の名前と、キャラ別称でも検索できます。
 - `全キャラ` は大量の保存値を書き換えます。実行前に必ずバックアップしてください。
 - `凍結` をオンにすると、GameGuardianの保存リストへ値を登録します。不要になったら同じ項目を凍結なしで変更して解除します。
 
@@ -215,7 +215,7 @@ KBC-GGscript/status-saves/
 | パス | 用途 | 編集の可否 |
 | --- | --- | --- |
 | `lua/KBC-GGscript.lua` | 実行するスクリプト | 編集非推奨 |
-| `data/unit-index.csv` | キャラID・形態名 | 更新時のみ |
+| `data/character-index.json` | キャラID・形態名・説明・検索用別称 | 更新時のみ |
 | `data/units/` | ユニットの基礎値 | 更新時のみ |
 | `data/status-fields.csv` | ステータス名・入力形式・倍率 | 上級者向け |
 | `settings/` | 表示設定 | 自動作成・自動更新 |
@@ -223,11 +223,13 @@ KBC-GGscript/status-saves/
 
 ## 更新方法
 
-1. `status-saves` フォルダを別の場所へコピーしてバックアップします。
-2. リポジトリの最新版をダウンロードして展開します。
-3. 既存の `KBC-GGscript` を置き換えます。
-4. バックアップした `status-saves` を新しいフォルダへ戻します。
-5. にゃんこ大戦争とGameGuardianを再起動してから実行します。
+ホームの `設定` → `スクリプトとデータを更新` を選ぶと、GitHubから次のファイルを取得して上書きします。
+
+- `lua/KBC-GGscript.lua`
+- `data/character-index.json`
+- `data/units/unit000.csv` ～ キャラ索引に含まれるユニットCSV
+
+更新中はGameGuardianを閉じたり通信を切断したりしないでください。更新後はスクリプトを終了して再起動すると、新しいLua本体が読み込まれます。`status-saves/` と `settings/` は更新対象外です。
 
 ゲームが更新された場合は、Luaだけでなく `data` も同じリリースの組み合わせで置き換えてください。
 
