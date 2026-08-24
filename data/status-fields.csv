@@ -116,3 +116,4 @@ index,name,type,multiplier
 114,爆波の範囲前方,number,4
 115,爆波の範囲後方,number,4
 116,爆波無効,checkbox,1
+117,遅延無効,checkbox,1
